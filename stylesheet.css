@@ -267,16 +267,58 @@ html {
   cursor: not-allowed;
 }
 
-.cloud-btn-secondary {
-  background: #fff;
-  color: #003057;
-  border: 1px solid #003057;
+.cloud-toggle {
+  position: relative;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #3a4552;
+  cursor: pointer;
+  user-select: none;
 }
 
-.cloud-btn-secondary:hover:not(:disabled) {
-  background: #f4f1e6;
-  color: #003057;
-  border-color: #b3a369;
+.cloud-toggle input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+}
+
+.cloud-toggle-track {
+  position: relative;
+  width: 34px;
+  height: 20px;
+  border-radius: 10px;
+  background: #cfd6e0;
+  transition: background 0.15s;
+}
+
+.cloud-toggle-track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: transform 0.15s;
+}
+
+.cloud-toggle input:checked + .cloud-toggle-track {
+  background: #003057;
+}
+
+.cloud-toggle input:checked + .cloud-toggle-track::after {
+  transform: translateX(14px);
+}
+
+.cloud-toggle input:focus-visible + .cloud-toggle-track {
+  outline: 2px solid #b3a369;
+  outline-offset: 2px;
 }
 
 .cloud-hint {

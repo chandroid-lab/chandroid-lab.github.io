@@ -45,7 +45,7 @@
                 </p>
               </td>
               <td style="padding:2.5%;width:37%;max-width:37%">
-                <a href="images/profile.jpg"><img style="width:100%;max-width:100%;object-fit: cover; border-radius: 50%;" alt="profile photo" src="images/profile.jpg" class="hoverZoomLink"></a>
+                <a href="images/profile.jpeg"><img style="width:100%;max-width:100%;aspect-ratio:1/1;object-fit:cover;object-position:50% 40%;border-radius:50%;" alt="profile photo" src="images/profile.jpeg" class="hoverZoomLink"></a>
               </td>
             </tr>
           </tbody></table>
@@ -254,7 +254,11 @@
                 <div class="cloud-panel">
                   <div class="cloud-controls">
                     <input type="password" id="cloud-api-key" class="cloud-input" placeholder="Gemini API key" autocomplete="off">
-                    <button type="button" id="cloud-save-key-btn" class="cloud-btn cloud-btn-secondary" title="You'll need your own Gemini API key — it's sent straight from your browser to Google and kept only in this browser's local storage; there's no server here to see it. Get one at aistudio.google.com/apikey">Save key</button>
+                    <label class="cloud-toggle" title="You'll need your own Gemini API key — it's sent straight from your browser to Google, and only kept in this browser's local storage if you turn this on; there's no server here to see it. Get one at aistudio.google.com/apikey">
+                      <input type="checkbox" id="cloud-remember-key" role="switch">
+                      <span class="cloud-toggle-track" aria-hidden="true"></span>
+                      <span class="cloud-toggle-label">Remember key</span>
+                    </label>
                   </div>
                   <div class="cloud-controls">
                     <input type="text" id="cloud-text" class="cloud-input" placeholder="A short phrase..." maxlength="20">
@@ -275,6 +279,7 @@
       </tr>
     </table>
 
-    <script src="cloud-playground.js?v=2" defer></script>
+    <script src="spot-renderer.js?v=1" defer></script>
+    <script src="cloud-playground.js?v=3" defer></script>
   </body>
 </html>

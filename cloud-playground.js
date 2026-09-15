@@ -3,7 +3,7 @@ document.addEventListener('DOMContentLoaded', () => {
   if (!canvas) return;
 
   const apiKeyInput = document.getElementById('cloud-api-key');
-  const saveKeyBtn = document.getElementById('cloud-save-key-btn');
+  const rememberKeyToggle = document.getElementById('cloud-remember-key');
   const textInput = document.getElementById('cloud-text');
   const generateBtn = document.getElementById('cloud-generate-btn');
   const statusEl = document.getElementById('cloud-status');
@@ -15,7 +15,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   try {
     const savedKey = localStorage.getItem(STORAGE_KEY);
-    if (savedKey) apiKeyInput.value = savedKey;
+    if (savedKey) {
+      apiKeyInput.value = savedKey;
+      rememberKeyToggle.checked = true;
+    }
   } catch (e) {
     // localStorage unavailable (private mode, etc.) — key just won't persist.
   }
@@ -28,8 +31,13 @@ document.addEventListener('DOMContentLoaded', () => {
     height: 0.2,
   };
 
-  // Starts a few meters back from Spot (see SPOT_POS in the shader),
-  // roughly at eye level and tilted slightly down toward it.
+  // Spot stands on the ground plane (y = 0); the scene is in meters.
+  const SPOT_POS = [0.1, 0, 2.35];
+  const SPOT_YAW = 2.5;
+  const SPOT_MAX_DIST = 20;
+
+  // Starts a few meters back from Spot, roughly at eye level and tilted
+  // slightly down toward it.
   const camera = {
     pos: [0, 1.15, 0],
     yaw: 0,
@@ -103,14 +111,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const vec3 SUN_DIR = normalize(vec3(0.4, 0.65, -0.35));
 
-    // Spot stands on the ground plane (y = 0); everything below is in meters.
-    const vec3 SPOT_POS = vec3(0.1, 0.0, 2.7);
-    const float SPOT_YAW = 2.5;
-    const vec3 SPOT_CENTER = SPOT_POS + vec3(0.0, 0.6, 0.0);
-    const float SPOT_RADIUS = 1.45;
-
-    const vec3 SPOT_YELLOW = vec3(0.95, 0.70, 0.06);
-    const vec3 SPOT_DARK = vec3(0.07, 0.07, 0.08);
+    // Spot itself is rasterized by spot-renderer.js into uSpotTex
+    // (rgb = lit color, a = camera distance / SPOT_MAX_DIST).
+    uniform sampler2D uSpotTex;
+    uniform float uSpotLoaded;
+    uniform vec3 uSpotPos;
+    uniform float uSpotYaw;
+    const float SPOT_MAX_DIST = ${SPOT_MAX_DIST.toFixed(1)};
 
     float cloudDensity(vec3 p) {
       float scale = mix(1.6, 0.6, uPuffiness);
@@ -129,7 +136,7 @@ document.addEventListener('DOMContentLoaded', () => {
       float band = 1.0 - smoothstep(0.8, 1.8, abs(p.y - bandCenter));
       // Thin the fog right around Spot so even the densest phrase leaves
       // the robot as a silhouette rather than swallowing it whole.
-      float clearing = mix(0.35, 1.0, smoothstep(0.9, 2.6, length(p - SPOT_CENTER)));
+      float clearing = mix(0.35, 1.0, smoothstep(0.9, 2.6, length(p - uSpotPos - vec3(0.0, 0.6, 0.0))));
       return clamp(base, 0.0, 1.0) * band * clearing;
     }
 
@@ -174,131 +181,25 @@ document.addEventListener('DOMContentLoaded', () => {
       return acc;
     }
 
-    float sdRoundBox(vec3 p, vec3 b, float r) {
-      vec3 q = abs(p) - b + r;
-      return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r;
-    }
-
-    float sdCapsule(vec3 p, vec3 a, vec3 b, float r) {
-      vec3 pa = p - a;
-      vec3 ba = b - a;
-      float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
-      return length(pa - ba * h) - r;
-    }
-
-    vec2 opU(vec2 a, vec2 b) {
-      return a.x < b.x ? a : b;
-    }
-
-    // Arm joint positions in Spot's local frame (x forward, y up), filled in
-    // once per pixel by setupArm() so the SDF doesn't redo the trig per step.
-    const vec3 SHOULDER = vec3(0.36, 0.76, 0.0);
-    vec3 gElbow;
-    vec3 gWrist;
-    vec3 gGrip;
-
-    // A slow idle: the arm sweeps side to side and bobs its gripper, like
-    // Spot looking around in the fog.
-    void setupArm() {
-      float swing = 0.5 * sin(uTime * 0.35);
-      vec3 fwd = vec3(cos(swing), 0.0, sin(swing));
-      vec3 up = vec3(0.0, 1.0, 0.0);
-      float lift = 1.9 + 0.1 * sin(uTime * 0.6);
-      float reach = -0.25 + 0.2 * sin(uTime * 0.6 + 1.2);
-      float wrist = -0.75 + 0.25 * sin(uTime * 0.8 + 0.5);
-      gElbow = SHOULDER + 0.34 * (cos(lift) * fwd + sin(lift) * up);
-      gWrist = gElbow + 0.42 * (cos(reach) * fwd + sin(reach) * up);
-      gGrip = gWrist + 0.18 * (cos(wrist) * fwd + sin(wrist) * up);
-    }
-
-    // Returns (distance, material): material 1 = Spot yellow, 2 = dark.
-    vec2 spotMap(vec3 wp) {
-      vec3 p = wp - SPOT_POS;
-      float c = cos(SPOT_YAW);
-      float s = sin(SPOT_YAW);
-      p = vec3(c * p.x - s * p.z, p.y, s * p.x + c * p.z);
-
-      vec2 res = vec2(sdRoundBox(p - vec3(0.0, 0.58, 0.0), vec3(0.46, 0.11, 0.16), 0.05), 1.0);
-      // Dark sensor heads front and back, and the belly plate.
-      res = opU(res, vec2(sdRoundBox(p - vec3(0.49, 0.57, 0.0), vec3(0.06, 0.09, 0.15), 0.035), 2.0));
-      res = opU(res, vec2(sdRoundBox(p - vec3(-0.49, 0.57, 0.0), vec3(0.06, 0.09, 0.15), 0.035), 2.0));
-      res = opU(res, vec2(sdRoundBox(p - vec3(0.0, 0.47, 0.0), vec3(0.38, 0.03, 0.13), 0.02), 2.0));
-
-      for (int i = 0; i < 4; i++) {
-        float fi = float(i);
-        float hx = fi < 1.5 ? 0.34 : -0.34;
-        float hz = mod(fi, 2.0) < 0.5 ? 0.2 : -0.2;
-        vec3 hip = vec3(hx, 0.52, hz);
-        // Spot's knees all point backward: thigh angles back, shin comes
-        // forward again so the foot lands under the hip.
-        vec3 knee = hip + vec3(-0.13, -0.25, 0.0);
-        vec3 foot = hip + vec3(0.0, -0.49, 0.0);
-        res = opU(res, vec2(length(p - hip) - 0.065, 2.0));
-        res = opU(res, vec2(sdCapsule(p, hip, knee, 0.05), 1.0));
-        res = opU(res, vec2(sdCapsule(p, knee, foot, 0.03), 2.0));
-        res = opU(res, vec2(length(p - foot) - 0.04, 2.0));
-      }
-
-      res = opU(res, vec2(length(p - SHOULDER) - 0.065, 1.0));
-      res = opU(res, vec2(sdCapsule(p, SHOULDER, gElbow, 0.042), 2.0));
-      res = opU(res, vec2(length(p - gElbow) - 0.05, 1.0));
-      res = opU(res, vec2(sdCapsule(p, gElbow, gWrist, 0.036), 2.0));
-      res = opU(res, vec2(length(p - gWrist) - 0.045, 1.0));
-      res = opU(res, vec2(sdCapsule(p, gWrist, gGrip, 0.03), 2.0));
-      return res;
-    }
-
-    // Sphere-traces Spot, but only inside its bounding sphere so rays that
-    // miss the robot (most of the frame) cost almost nothing.
-    float marchSpot(vec3 ro, vec3 rd, out float mat) {
-      mat = 0.0;
-      vec3 oc = ro - SPOT_CENTER;
-      float b = dot(oc, rd);
-      float h = b * b - dot(oc, oc) + SPOT_RADIUS * SPOT_RADIUS;
-      if (h < 0.0) return -1.0;
-      h = sqrt(h);
-      float tEnd = -b + h;
-      if (tEnd < 0.0) return -1.0;
-      float t = max(-b - h, 0.0);
-      for (int i = 0; i < 72; i++) {
-        vec2 d = spotMap(ro + rd * t);
-        if (d.x < 0.0015 * max(t, 1.0)) {
-          mat = d.y;
-          return t;
-        }
-        t += d.x;
-        if (t > tEnd) break;
-      }
-      return -1.0;
-    }
-
-    vec3 spotNormal(vec3 p) {
-      const vec2 k = vec2(1.0, -1.0);
-      const float e = 0.002;
-      return normalize(
-        k.xyy * spotMap(p + k.xyy * e).x +
-        k.yyx * spotMap(p + k.yyx * e).x +
-        k.yxy * spotMap(p + k.yxy * e).x +
-        k.xxx * spotMap(p + k.xxx * e).x
-      );
-    }
-
-    float spotShadow(vec3 p) {
-      if (length(p.xz - SPOT_POS.xz) > 2.6) return 1.0;
-      float res = 1.0;
-      float t = 0.02;
-      for (int i = 0; i < 32; i++) {
-        float h = spotMap(p + SUN_DIR * t).x;
-        res = min(res, 8.0 * h / t);
-        t += clamp(h, 0.02, 0.2);
-        if (res < 0.01 || t > 2.5) break;
-      }
-      return clamp(res, 0.0, 1.0);
+    // Soft blob shadow under Spot, nudged away from the sun. The fog keeps
+    // the light diffuse, so a blurry footprint reads better than a crisp one.
+    float spotGroundShade(vec3 gp) {
+      vec2 d = gp.xz - uSpotPos.xz;
+      float c = cos(uSpotYaw);
+      float s = sin(uSpotYaw);
+      vec2 local = vec2(c * d.x - s * d.y, s * d.x + c * d.y);
+      float contact = length(local / vec2(0.5, 0.26));
+      vec2 sunShift = -SUN_DIR.xz / SUN_DIR.y * 0.45;
+      vec2 ds = d - sunShift;
+      vec2 localSun = vec2(c * ds.x - s * ds.y, s * ds.x + c * ds.y);
+      float castDist = length(localSun / vec2(0.6, 0.3));
+      float shade = 1.0 - 0.45 * (1.0 - smoothstep(0.3, 1.2, contact));
+      shade *= 1.0 - 0.3 * (1.0 - smoothstep(0.4, 1.4, castDist));
+      return shade;
     }
 
     void main() {
       vec2 uv = (gl_FragCoord.xy - 0.5 * uResolution) / uResolution.y;
-      setupArm();
 
       vec3 forward = vec3(sin(uYaw) * cos(uPitch), sin(uPitch), cos(uYaw) * cos(uPitch));
       vec3 right = normalize(vec3(cos(uYaw), 0.0, -sin(uYaw)));
@@ -322,24 +223,17 @@ document.addEventListener('DOMContentLoaded', () => {
         vec3 gp = ro + rd * tg;
         float grain = noise(gp * 2.5) * 0.6 + noise(gp * 11.0) * 0.4;
         vec3 ground = mix(vec3(0.24, 0.27, 0.25), vec3(0.34, 0.36, 0.33), grain);
-        float nearSpot = spotMap(gp + vec3(0.0, 0.08, 0.0)).x;
-        float ao = mix(0.45, 1.0, smoothstep(0.0, 0.3, nearSpot));
-        float light = 0.5 + 0.5 * SUN_DIR.y * spotShadow(gp + vec3(0.0, 0.01, 0.0));
-        surf = ground * light * ao;
+        surf = ground * (0.5 + 0.5 * SUN_DIR.y) * mix(1.0, spotGroundShade(gp), uSpotLoaded);
         tHit = tg;
       }
 
-      float mat;
-      float ts = marchSpot(ro, rd, mat);
-      if (ts > 0.0 && ts < tHit) {
-        vec3 sp = ro + rd * ts;
-        vec3 n = spotNormal(sp);
-        vec3 albedo = mat < 1.5 ? SPOT_YELLOW : SPOT_DARK;
-        float diff = clamp(dot(n, SUN_DIR), 0.0, 1.0) * spotShadow(sp + n * 0.02);
-        float sky = 0.55 + 0.45 * n.y;
-        float spec = pow(clamp(dot(reflect(rd, n), SUN_DIR), 0.0, 1.0), 24.0);
-        surf = albedo * (0.35 * sky + 0.8 * diff) + vec3(0.25) * spec * diff;
-        tHit = ts;
+      vec4 spot = texture2D(uSpotTex, gl_FragCoord.xy / uResolution);
+      if (uSpotLoaded > 0.5 && spot.a > 0.0) {
+        float ts = spot.a * SPOT_MAX_DIST;
+        if (ts < tHit) {
+          surf = spot.rgb;
+          tHit = ts;
+        }
       }
 
       if (tHit < 1e4) {
@@ -355,6 +249,9 @@ document.addEventListener('DOMContentLoaded', () => {
   const gl = canvas.getContext('webgl');
   let uResolution, uTime, uCloudColor, uDensity, uPuffiness, uTurbulence, uHeight;
   let uCamPos, uYaw, uPitch;
+  let uSpotTex, uSpotLoaded, uSpotPos, uSpotYaw;
+  let fogProgram, quadBuffer, quadPosLoc;
+  let spot = null;
 
   function compileShader(type, src) {
     const sh = gl.createShader(type);
@@ -389,14 +286,27 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
       throw new Error(gl.getProgramInfoLog(program) || 'Program link failed.');
     }
+    fogProgram = program;
     gl.useProgram(program);
 
-    const buf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    quadBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
-    const posLoc = gl.getAttribLocation(program, 'aPos');
-    gl.enableVertexAttribArray(posLoc);
-    gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+    quadPosLoc = gl.getAttribLocation(program, 'aPos');
+
+    uSpotTex = gl.getUniformLocation(program, 'uSpotTex');
+    uSpotLoaded = gl.getUniformLocation(program, 'uSpotLoaded');
+    uSpotPos = gl.getUniformLocation(program, 'uSpotPos');
+    uSpotYaw = gl.getUniformLocation(program, 'uSpotYaw');
+
+    // The fog scene still works if the robot can't be drawn for some reason.
+    if (window.createSpotRenderer) {
+      try {
+        spot = window.createSpotRenderer(gl, 'models/spot.bin?v=1');
+      } catch (err) {
+        console.warn(err);
+      }
+    }
 
     uResolution = gl.getUniformLocation(program, 'uResolution');
     uTime = gl.getUniformLocation(program, 'uTime');
@@ -464,8 +374,43 @@ document.addEventListener('DOMContentLoaded', () => {
     updateCamera(dt);
 
     resize();
+    const time = t * 0.001;
+
+    let spotDrawn = false;
+    if (spot) {
+      const cy = Math.cos(camera.yaw);
+      const sy = Math.sin(camera.yaw);
+      const cp = Math.cos(camera.pitch);
+      const sp = Math.sin(camera.pitch);
+      // Same basis as the fog shader: up = cross(forward, right).
+      spotDrawn = spot.render({
+        width: canvas.width,
+        height: canvas.height,
+        time,
+        spotPos: SPOT_POS,
+        spotYaw: SPOT_YAW,
+        camera: {
+          pos: camera.pos,
+          forward: [sy * cp, sp, cy * cp],
+          right: [cy, 0, -sy],
+          up: [-sp * sy, cp, -sp * cy],
+        },
+      });
+    }
+
+    gl.useProgram(fogProgram);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
+    gl.enableVertexAttribArray(quadPosLoc);
+    gl.vertexAttribPointer(quadPosLoc, 2, gl.FLOAT, false, 0, 0);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, spot ? spot.texture : null);
+    gl.uniform1i(uSpotTex, 0);
+    gl.uniform1f(uSpotLoaded, spotDrawn ? 1 : 0);
+    gl.uniform3f(uSpotPos, SPOT_POS[0], SPOT_POS[1], SPOT_POS[2]);
+    gl.uniform1f(uSpotYaw, SPOT_YAW);
     gl.uniform2f(uResolution, canvas.width, canvas.height);
-    gl.uniform1f(uTime, t * 0.001);
+    gl.uniform1f(uTime, time);
     gl.uniform3f(uCloudColor, params.color[0], params.color[1], params.color[2]);
     gl.uniform1f(uDensity, params.density);
     gl.uniform1f(uPuffiness, params.puffiness);
@@ -481,6 +426,8 @@ document.addEventListener('DOMContentLoaded', () => {
   function startLoop() {
     if (looping) return;
     looping = true;
+    // Fetch the robot mesh only once the playground is actually on screen.
+    if (spot) spot.load();
     lastFrameTime = 0;
     requestAnimationFrame(frame);
   }
@@ -701,15 +648,9 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
-    try {
-      localStorage.setItem(STORAGE_KEY, apiKey);
-    } catch (e) {
-      // localStorage unavailable — key just won't persist across visits.
-    }
-
     generateBtn.disabled = true;
     descriptionEl.hidden = true;
-    setStatus('Asking Gemini to imagine a cloud...', false);
+    setStatus('Asking Gemini to imagine the fog...', false);
 
     try {
       const result = await callGemini(apiKey, text);
@@ -737,17 +678,26 @@ document.addEventListener('DOMContentLoaded', () => {
     if (evt.key === 'Enter') generateCloud();
   });
 
-  saveKeyBtn.addEventListener('click', () => {
+  // While "Remember key" is on, the stored key tracks whatever is typed;
+  // turning it off forgets the key in this browser right away.
+  function syncStoredKey() {
     const apiKey = (apiKeyInput.value || '').trim();
-    if (!apiKey) {
-      setStatus('Enter a key to save.', true);
-      return;
-    }
     try {
-      localStorage.setItem(STORAGE_KEY, apiKey);
-      setStatus('API key saved in this browser.', false);
+      if (rememberKeyToggle.checked && apiKey) {
+        localStorage.setItem(STORAGE_KEY, apiKey);
+      } else {
+        localStorage.removeItem(STORAGE_KEY);
+      }
     } catch (e) {
-      setStatus('Could not save the key (local storage unavailable).', true);
+      if (rememberKeyToggle.checked) {
+        rememberKeyToggle.checked = false;
+        setStatus('Could not remember the key (local storage unavailable).', true);
+      }
     }
+  }
+
+  rememberKeyToggle.addEventListener('change', syncStoredKey);
+  apiKeyInput.addEventListener('input', () => {
+    if (rememberKeyToggle.checked) syncStoredKey();
   });
 });
