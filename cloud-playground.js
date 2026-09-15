@@ -22,23 +22,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
   let params = {
     color: [1, 1, 1],
-    density: 0.72,
+    density: 0.6,
     puffiness: 0.68,
     turbulence: 0.3,
-    height: 0.65,
+    height: 0.2,
   };
 
-  // Mirrors the bandCenter mix() in the shader's cloudDensity() — used so
-  // the camera can start out sitting inside the cloud layer.
-  const CLOUD_BAND_MIN = 1.2;
-  const CLOUD_BAND_MAX = 3.5;
-  const startY = CLOUD_BAND_MIN + params.height * (CLOUD_BAND_MAX - CLOUD_BAND_MIN);
-
+  // Starts a few meters back from Spot (see SPOT_POS in the shader),
+  // roughly at eye level and tilted slightly down toward it.
   const camera = {
-    pos: [0, startY, 0],
+    pos: [0, 1.15, 0],
     yaw: 0,
-    pitch: 0,
+    pitch: -0.14,
   };
+  const MIN_CAMERA_Y = 0.15;
   const keys = Object.create(null);
   let dragging = false;
   let lastPointerX = 0;
@@ -106,6 +103,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const vec3 SUN_DIR = normalize(vec3(0.4, 0.65, -0.35));
 
+    // Spot stands on the ground plane (y = 0); everything below is in meters.
+    const vec3 SPOT_POS = vec3(0.1, 0.0, 2.7);
+    const float SPOT_YAW = 2.5;
+    const vec3 SPOT_CENTER = SPOT_POS + vec3(0.0, 0.6, 0.0);
+    const float SPOT_RADIUS = 1.45;
+
+    const vec3 SPOT_YELLOW = vec3(0.95, 0.70, 0.06);
+    const vec3 SPOT_DARK = vec3(0.07, 0.07, 0.08);
+
     float cloudDensity(vec3 p) {
       float scale = mix(1.6, 0.6, uPuffiness);
       vec3 q = p * scale;
@@ -119,9 +125,12 @@ document.addEventListener('DOMContentLoaded', () => {
       // High-frequency detail carves in the small cauliflower-like bumps
       // real cumulus edges have, instead of smooth blobby silhouettes.
       base -= 0.15 * (1.0 - fbm(q * 4.0 + 7.3));
-      float bandCenter = mix(1.2, 3.5, uHeight);
+      float bandCenter = mix(0.6, 2.4, uHeight);
       float band = 1.0 - smoothstep(0.8, 1.8, abs(p.y - bandCenter));
-      return clamp(base, 0.0, 1.0) * band;
+      // Thin the fog right around Spot so even the densest phrase leaves
+      // the robot as a silhouette rather than swallowing it whole.
+      float clearing = mix(0.35, 1.0, smoothstep(0.9, 2.6, length(p - SPOT_CENTER)));
+      return clamp(base, 0.0, 1.0) * band * clearing;
     }
 
     // Marches a short hop toward the sun to see how much denser the cloud
@@ -137,11 +146,14 @@ document.addEventListener('DOMContentLoaded', () => {
       return clamp(1.0 - shadow * 0.85, 0.05, 1.0);
     }
 
-    vec4 raymarchClouds(vec3 ro, vec3 rd) {
+    // tMax is the distance to the nearest solid surface, so fog in front of
+    // Spot or the ground covers it but fog behind it doesn't bleed through.
+    vec4 raymarchClouds(vec3 ro, vec3 rd, float tMax) {
       vec4 acc = vec4(0.0);
       float t = 0.0;
+      float tEnd = min(11.0, tMax);
       for (int i = 0; i < 72; i++) {
-        if (acc.a > 0.99 || t > 11.0) break;
+        if (acc.a > 0.99 || t > tEnd) break;
         vec3 p = ro + rd * t;
         float d = cloudDensity(p);
         if (d > 0.01) {
@@ -162,55 +174,131 @@ document.addEventListener('DOMContentLoaded', () => {
       return acc;
     }
 
-    const float OCEAN_Y = -4.0;
-
-    // A distant mountain range, drawn purely from the ray's world-space
-    // azimuth so it reads as an infinitely-far backdrop behind the sea.
-    vec3 mountainLayer(vec3 col, vec3 rd) {
-      float az = atan(rd.z, rd.x);
-      float ridge = 0.05 * sin(az * 2.3 + 1.0)
-                  + 0.03 * sin(az * 5.1 + 4.0)
-                  + 0.018 * sin(az * 11.0 + 2.0);
-      float horizonLevel = -0.015 + ridge;
-      float mask = smoothstep(horizonLevel + 0.02, horizonLevel - 0.015, rd.y);
-      vec3 near = vec3(0.42, 0.48, 0.62);
-      vec3 far = vec3(0.72, 0.78, 0.88);
-      vec3 mountainColor = mix(near, far, clamp((rd.y - horizonLevel) / 0.25 + 0.5, 0.0, 1.0));
-      return mix(col, mountainColor, mask);
+    float sdRoundBox(vec3 p, vec3 b, float r) {
+      vec3 q = abs(p) - b + r;
+      return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r;
     }
 
-    // Ray/plane hit against a sine-waved sea, with a sun glint and
-    // distance fog so it fades into the sky instead of cutting off.
-    vec3 oceanLayer(vec3 col, vec3 ro, vec3 rd, vec3 skyBottom) {
-      if (rd.y >= -0.02 || ro.y <= OCEAN_Y) return col;
-      float tOcean = (OCEAN_Y - ro.y) / rd.y;
-      if (tOcean <= 0.0 || tOcean > 60.0) return col;
+    float sdCapsule(vec3 p, vec3 a, vec3 b, float r) {
+      vec3 pa = p - a;
+      vec3 ba = b - a;
+      float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+      return length(pa - ba * h) - r;
+    }
 
-      vec3 p = ro + rd * tOcean;
-      float wave = sin(p.x * 0.9 + uTime * 0.6) + sin(p.z * 1.3 - uTime * 0.8 + p.x * 0.4);
-      vec3 deepSea = vec3(0.02, 0.13, 0.29);
-      vec3 shallowSea = vec3(0.10, 0.36, 0.46);
-      vec3 seaColor = mix(deepSea, shallowSea, clamp(wave * 0.25 + 0.5, 0.0, 1.0));
+    vec2 opU(vec2 a, vec2 b) {
+      return a.x < b.x ? a : b;
+    }
 
-      vec3 waveNormal = normalize(vec3(
-        -cos(p.x * 0.9 + uTime * 0.6) * 0.9 * 0.15,
-        1.0,
-        -cos(p.z * 1.3 - uTime * 0.8 + p.x * 0.4) * 1.3 * 0.15
-      ));
-      vec3 reflectDir = reflect(-SUN_DIR, waveNormal);
-      float spec = pow(clamp(dot(reflectDir, -rd), 0.0, 1.0), 60.0);
-      seaColor += vec3(1.0, 0.9, 0.7) * spec * 1.5;
+    // Arm joint positions in Spot's local frame (x forward, y up), filled in
+    // once per pixel by setupArm() so the SDF doesn't redo the trig per step.
+    const vec3 SHOULDER = vec3(0.36, 0.76, 0.0);
+    vec3 gElbow;
+    vec3 gWrist;
+    vec3 gGrip;
 
-      float fog = clamp(tOcean / 34.0, 0.0, 1.0);
-      return mix(seaColor, skyBottom, fog);
+    // A slow idle: the arm sweeps side to side and bobs its gripper, like
+    // Spot looking around in the fog.
+    void setupArm() {
+      float swing = 0.5 * sin(uTime * 0.35);
+      vec3 fwd = vec3(cos(swing), 0.0, sin(swing));
+      vec3 up = vec3(0.0, 1.0, 0.0);
+      float lift = 1.9 + 0.1 * sin(uTime * 0.6);
+      float reach = -0.25 + 0.2 * sin(uTime * 0.6 + 1.2);
+      float wrist = -0.75 + 0.25 * sin(uTime * 0.8 + 0.5);
+      gElbow = SHOULDER + 0.34 * (cos(lift) * fwd + sin(lift) * up);
+      gWrist = gElbow + 0.42 * (cos(reach) * fwd + sin(reach) * up);
+      gGrip = gWrist + 0.18 * (cos(wrist) * fwd + sin(wrist) * up);
+    }
+
+    // Returns (distance, material): material 1 = Spot yellow, 2 = dark.
+    vec2 spotMap(vec3 wp) {
+      vec3 p = wp - SPOT_POS;
+      float c = cos(SPOT_YAW);
+      float s = sin(SPOT_YAW);
+      p = vec3(c * p.x - s * p.z, p.y, s * p.x + c * p.z);
+
+      vec2 res = vec2(sdRoundBox(p - vec3(0.0, 0.58, 0.0), vec3(0.46, 0.11, 0.16), 0.05), 1.0);
+      // Dark sensor heads front and back, and the belly plate.
+      res = opU(res, vec2(sdRoundBox(p - vec3(0.49, 0.57, 0.0), vec3(0.06, 0.09, 0.15), 0.035), 2.0));
+      res = opU(res, vec2(sdRoundBox(p - vec3(-0.49, 0.57, 0.0), vec3(0.06, 0.09, 0.15), 0.035), 2.0));
+      res = opU(res, vec2(sdRoundBox(p - vec3(0.0, 0.47, 0.0), vec3(0.38, 0.03, 0.13), 0.02), 2.0));
+
+      for (int i = 0; i < 4; i++) {
+        float fi = float(i);
+        float hx = fi < 1.5 ? 0.34 : -0.34;
+        float hz = mod(fi, 2.0) < 0.5 ? 0.2 : -0.2;
+        vec3 hip = vec3(hx, 0.52, hz);
+        // Spot's knees all point backward: thigh angles back, shin comes
+        // forward again so the foot lands under the hip.
+        vec3 knee = hip + vec3(-0.13, -0.25, 0.0);
+        vec3 foot = hip + vec3(0.0, -0.49, 0.0);
+        res = opU(res, vec2(length(p - hip) - 0.065, 2.0));
+        res = opU(res, vec2(sdCapsule(p, hip, knee, 0.05), 1.0));
+        res = opU(res, vec2(sdCapsule(p, knee, foot, 0.03), 2.0));
+        res = opU(res, vec2(length(p - foot) - 0.04, 2.0));
+      }
+
+      res = opU(res, vec2(length(p - SHOULDER) - 0.065, 1.0));
+      res = opU(res, vec2(sdCapsule(p, SHOULDER, gElbow, 0.042), 2.0));
+      res = opU(res, vec2(length(p - gElbow) - 0.05, 1.0));
+      res = opU(res, vec2(sdCapsule(p, gElbow, gWrist, 0.036), 2.0));
+      res = opU(res, vec2(length(p - gWrist) - 0.045, 1.0));
+      res = opU(res, vec2(sdCapsule(p, gWrist, gGrip, 0.03), 2.0));
+      return res;
+    }
+
+    // Sphere-traces Spot, but only inside its bounding sphere so rays that
+    // miss the robot (most of the frame) cost almost nothing.
+    float marchSpot(vec3 ro, vec3 rd, out float mat) {
+      mat = 0.0;
+      vec3 oc = ro - SPOT_CENTER;
+      float b = dot(oc, rd);
+      float h = b * b - dot(oc, oc) + SPOT_RADIUS * SPOT_RADIUS;
+      if (h < 0.0) return -1.0;
+      h = sqrt(h);
+      float tEnd = -b + h;
+      if (tEnd < 0.0) return -1.0;
+      float t = max(-b - h, 0.0);
+      for (int i = 0; i < 72; i++) {
+        vec2 d = spotMap(ro + rd * t);
+        if (d.x < 0.0015 * max(t, 1.0)) {
+          mat = d.y;
+          return t;
+        }
+        t += d.x;
+        if (t > tEnd) break;
+      }
+      return -1.0;
+    }
+
+    vec3 spotNormal(vec3 p) {
+      const vec2 k = vec2(1.0, -1.0);
+      const float e = 0.002;
+      return normalize(
+        k.xyy * spotMap(p + k.xyy * e).x +
+        k.yyx * spotMap(p + k.yyx * e).x +
+        k.yxy * spotMap(p + k.yxy * e).x +
+        k.xxx * spotMap(p + k.xxx * e).x
+      );
+    }
+
+    float spotShadow(vec3 p) {
+      if (length(p.xz - SPOT_POS.xz) > 2.6) return 1.0;
+      float res = 1.0;
+      float t = 0.02;
+      for (int i = 0; i < 32; i++) {
+        float h = spotMap(p + SUN_DIR * t).x;
+        res = min(res, 8.0 * h / t);
+        t += clamp(h, 0.02, 0.2);
+        if (res < 0.01 || t > 2.5) break;
+      }
+      return clamp(res, 0.0, 1.0);
     }
 
     void main() {
       vec2 uv = (gl_FragCoord.xy - 0.5 * uResolution) / uResolution.y;
-
-      vec3 skyTop = vec3(0.10, 0.35, 0.80);
-      vec3 skyBottom = vec3(0.55, 0.75, 0.98);
-      vec3 col = mix(skyBottom, skyTop, clamp(uv.y + 0.5, 0.0, 1.0));
+      setupArm();
 
       vec3 forward = vec3(sin(uYaw) * cos(uPitch), sin(uPitch), cos(uYaw) * cos(uPitch));
       vec3 right = normalize(vec3(cos(uYaw), 0.0, -sin(uYaw)));
@@ -218,13 +306,47 @@ document.addEventListener('DOMContentLoaded', () => {
       vec3 ro = uCamPos;
       vec3 rd = normalize(forward + uv.x * right + uv.y * up);
 
+      // A pale, washed-out sky: the horizon is the same haze color that
+      // distant ground fades into, so there's no visible edge to the world.
+      vec3 haze = mix(vec3(0.66, 0.71, 0.77), uCloudColor * vec3(0.72, 0.75, 0.8), 0.3);
+      vec3 skyTop = vec3(0.42, 0.55, 0.72);
+      vec3 col = mix(haze, skyTop, smoothstep(-0.02, 0.8, rd.y));
       float sunAmt = pow(clamp(dot(rd, SUN_DIR), 0.0, 1.0), 8.0);
-      col += vec3(1.0, 0.85, 0.6) * sunAmt * 0.35;
+      col += vec3(1.0, 0.9, 0.75) * sunAmt * 0.18;
 
-      col = mountainLayer(col, rd);
-      col = oceanLayer(col, ro, rd, skyBottom);
+      float tHit = 1e4;
+      vec3 surf = vec3(0.0);
 
-      vec4 acc = raymarchClouds(ro, rd);
+      if (rd.y < 0.0) {
+        float tg = -ro.y / rd.y;
+        vec3 gp = ro + rd * tg;
+        float grain = noise(gp * 2.5) * 0.6 + noise(gp * 11.0) * 0.4;
+        vec3 ground = mix(vec3(0.24, 0.27, 0.25), vec3(0.34, 0.36, 0.33), grain);
+        float nearSpot = spotMap(gp + vec3(0.0, 0.08, 0.0)).x;
+        float ao = mix(0.45, 1.0, smoothstep(0.0, 0.3, nearSpot));
+        float light = 0.5 + 0.5 * SUN_DIR.y * spotShadow(gp + vec3(0.0, 0.01, 0.0));
+        surf = ground * light * ao;
+        tHit = tg;
+      }
+
+      float mat;
+      float ts = marchSpot(ro, rd, mat);
+      if (ts > 0.0 && ts < tHit) {
+        vec3 sp = ro + rd * ts;
+        vec3 n = spotNormal(sp);
+        vec3 albedo = mat < 1.5 ? SPOT_YELLOW : SPOT_DARK;
+        float diff = clamp(dot(n, SUN_DIR), 0.0, 1.0) * spotShadow(sp + n * 0.02);
+        float sky = 0.55 + 0.45 * n.y;
+        float spec = pow(clamp(dot(reflect(rd, n), SUN_DIR), 0.0, 1.0), 24.0);
+        surf = albedo * (0.35 * sky + 0.8 * diff) + vec3(0.25) * spec * diff;
+        tHit = ts;
+      }
+
+      if (tHit < 1e4) {
+        col = mix(haze, surf, exp(-tHit * 0.09));
+      }
+
+      vec4 acc = raymarchClouds(ro, rd, tHit);
       col = mix(col, acc.rgb, acc.a);
       gl_FragColor = vec4(col, 1.0);
     }
@@ -315,6 +437,7 @@ document.addEventListener('DOMContentLoaded', () => {
     camera.pos[0] += (forward[0] * forwardAmt + right[0] * strafeAmt) * dist;
     camera.pos[1] += forward[1] * forwardAmt * dist;
     camera.pos[2] += (forward[2] * forwardAmt + right[2] * strafeAmt) * dist;
+    camera.pos[1] = Math.max(MIN_CAMERA_Y, camera.pos[1]);
   }
 
   // Pinch spread/pinch on mobile dollies forward/back along the view
@@ -324,6 +447,7 @@ document.addEventListener('DOMContentLoaded', () => {
     camera.pos[0] += forward[0] * amount;
     camera.pos[1] += forward[1] * amount;
     camera.pos[2] += forward[2] * amount;
+    camera.pos[1] = Math.max(MIN_CAMERA_Y, camera.pos[1]);
   }
 
   // The shader is a fairly heavy per-pixel raymarch, so it only runs while
@@ -515,8 +639,8 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     const prompt = `A visitor typed this short phrase: "${text}"\n\n` +
-      'Imagine it as a single cloud floating in a blue sky, and respond with JSON only:\n' +
-      '- description: one vivid sentence (max ~25 words) picturing this cloud.\n' +
+      'Imagine it as the fog drifting around a Spot robot dog standing in an open field, and respond with JSON only:\n' +
+      '- description: one vivid sentence (max ~25 words) picturing this fog.\n' +
       '- colorHex: a hex color (e.g. "#ffffff") for the cloud body, from stormy grey to sunlit white or pink, matching the mood.\n' +
       '- density: 0 to 1, how thick and opaque the cloud is.\n' +
       '- puffiness: 0 to 1, how large and rounded (1) versus wispy and fine-grained (0) the shapes are.\n' +
