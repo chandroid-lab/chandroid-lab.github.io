@@ -7,8 +7,8 @@
 
     <meta name="author" content="Chan Lee">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="shortcut icon" href="images/favicon/favicon.ico?v=2" type="image/x-icon">
-    <link rel="stylesheet" type="text/css" href="stylesheet.css">
+    <link rel="shortcut icon" href="images/favicon/favicon.ico?v=3" type="image/x-icon">
+    <link rel="stylesheet" type="text/css" href="stylesheet.css?v=2">
   </head>
 
   <body>
@@ -46,6 +46,28 @@
               </td>
               <td style="padding:2.5%;width:37%;max-width:37%">
                 <a href="images/profile.jpeg"><img style="width:100%;max-width:100%;aspect-ratio:1/1;object-fit:cover;object-position:50% 40%;border-radius:50%;" alt="profile photo" src="images/profile.jpeg" class="hoverZoomLink"></a>
+              </td>
+            </tr>
+          </tbody></table>
+
+          <!-- Playground -->
+          <table style="width:100%;border:0px;border-spacing:0px;border-collapse:separate;margin-right:auto;margin-left:auto;"><tbody>
+            <tr>
+              <td style="padding:16px;width:100%;vertical-align:middle">
+                <h2 id="section-playground">Playground</h2>
+              </td>
+            </tr>
+          </tbody></table>
+          <table style="width:100%;border:0px;border-spacing:0px 10px;border-collapse:separate;margin-right:auto;margin-left:auto;"><tbody>
+            <tr>
+              <td style="padding:8px 16px;width:100%;vertical-align:middle">
+                <div class="cloud-panel">
+                  <p id="cloud-status" class="cloud-status" hidden></p>
+                  <div class="cloud-canvas-wrap">
+                    <canvas id="cloud-canvas" class="cloud-canvas" tabindex="0"></canvas>
+                  </div>
+                  <p class="cloud-hint">Drag to look around &middot; WASD or arrow keys to fly &middot; pinch to move forward/back.</p>
+                </div>
               </td>
             </tr>
           </tbody></table>
@@ -236,50 +258,11 @@
 
           </div>
 
-          <!-- Playground -->
-          <table style="width:100%;border:0px;border-spacing:0px;border-collapse:separate;margin-right:auto;margin-left:auto;"><tbody>
-            <tr>
-              <td style="padding:16px;width:100%;vertical-align:middle">
-                <h2 id="section-playground">Playground</h2>
-              </td>
-            </tr>
-          </tbody></table>
-          <table style="width:100%;border:0px;border-spacing:0px 10px;border-collapse:separate;margin-right:auto;margin-left:auto;"><tbody>
-            <tr>
-              <td style="padding:8px 16px;width:100%;vertical-align:middle">
-                <p style="margin:0 0 10px 0;">
-                  Type a short phrase (20 characters or fewer) and Gemini imagines it as the fog around Spot.
-                </p>
-
-                <div class="cloud-panel">
-                  <div class="cloud-controls">
-                    <input type="password" id="cloud-api-key" class="cloud-input" placeholder="Gemini API key" autocomplete="off">
-                    <label class="cloud-toggle" title="You'll need your own Gemini API key — it's sent straight from your browser to Google, and only kept in this browser's local storage if you turn this on; there's no server here to see it. Get one at aistudio.google.com/apikey">
-                      <input type="checkbox" id="cloud-remember-key" role="switch">
-                      <span class="cloud-toggle-track" aria-hidden="true"></span>
-                      <span class="cloud-toggle-label">Remember key</span>
-                    </label>
-                  </div>
-                  <div class="cloud-controls">
-                    <input type="text" id="cloud-text" class="cloud-input" placeholder="A short phrase..." maxlength="20">
-                    <button type="button" id="cloud-generate-btn" class="cloud-btn">Generate cloud</button>
-                  </div>
-                  <p id="cloud-status" class="cloud-status" hidden></p>
-                  <div class="cloud-canvas-wrap">
-                    <canvas id="cloud-canvas" class="cloud-canvas" tabindex="0"></canvas>
-                  </div>
-                  <p class="cloud-hint">Drag to look around &middot; WASD or arrow keys to fly &middot; pinch to move forward/back.</p>
-                  <p id="cloud-description" class="cloud-description" hidden></p>
-                </div>
-              </td>
-            </tr>
-          </tbody></table>
-
         </td>
       </tr>
     </table>
 
     <script src="spot-renderer.js?v=1" defer></script>
-    <script src="cloud-playground.js?v=3" defer></script>
+    <script src="cloud-playground.js?v=4" defer></script>
   </body>
 </html>

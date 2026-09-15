@@ -2,28 +2,16 @@ document.addEventListener('DOMContentLoaded', () => {
   const canvas = document.getElementById('cloud-canvas');
   if (!canvas) return;
 
-  const apiKeyInput = document.getElementById('cloud-api-key');
-  const rememberKeyToggle = document.getElementById('cloud-remember-key');
-  const textInput = document.getElementById('cloud-text');
-  const generateBtn = document.getElementById('cloud-generate-btn');
   const statusEl = document.getElementById('cloud-status');
-  const descriptionEl = document.getElementById('cloud-description');
 
-  const STORAGE_KEY = 'cloud-playground-gemini-key';
-  // "-latest" alias so this doesn't 404 as Google retires dated model snapshots.
-  const MODEL = 'gemini-flash-latest';
-
+  // Visitors used to paste their own Gemini key; drop any copy left behind.
   try {
-    const savedKey = localStorage.getItem(STORAGE_KEY);
-    if (savedKey) {
-      apiKeyInput.value = savedKey;
-      rememberKeyToggle.checked = true;
-    }
+    localStorage.removeItem('cloud-playground-gemini-key');
   } catch (e) {
-    // localStorage unavailable (private mode, etc.) — key just won't persist.
+    // localStorage unavailable (private mode, etc.) — nothing to clean up.
   }
 
-  let params = {
+  const params = {
     color: [1, 1, 1],
     density: 0.6,
     puffiness: 0.68,
@@ -555,149 +543,4 @@ document.addEventListener('DOMContentLoaded', () => {
       setStatus(err.message || 'Could not start the WebGL renderer.', true);
     }
   }
-
-  function clamp01(v) {
-    v = Number(v);
-    if (!isFinite(v)) return 0.5;
-    return Math.min(1, Math.max(0, v));
-  }
-
-  function hexToRgb(hex) {
-    if (typeof hex !== 'string') return null;
-    const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
-    if (!m) return null;
-    const n = parseInt(m[1], 16);
-    return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
-  }
-
-  async function callGemini(apiKey, text) {
-    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
-    const schema = {
-      type: 'object',
-      properties: {
-        description: { type: 'string' },
-        colorHex: { type: 'string' },
-        density: { type: 'number' },
-        puffiness: { type: 'number' },
-        turbulence: { type: 'number' },
-        height: { type: 'number' },
-      },
-      required: ['description', 'colorHex', 'density', 'puffiness', 'turbulence', 'height'],
-    };
-
-    const prompt = `A visitor typed this short phrase: "${text}"\n\n` +
-      'Imagine it as the fog drifting around a Spot robot dog standing in an open field, and respond with JSON only:\n' +
-      '- description: one vivid sentence (max ~25 words) picturing this fog.\n' +
-      '- colorHex: a hex color (e.g. "#ffffff") for the cloud body, from stormy grey to sunlit white or pink, matching the mood.\n' +
-      '- density: 0 to 1, how thick and opaque the cloud is.\n' +
-      '- puffiness: 0 to 1, how large and rounded (1) versus wispy and fine-grained (0) the shapes are.\n' +
-      '- turbulence: 0 to 1, how chaotic and stormy (1) versus calm and smooth (0) it looks.\n' +
-      '- height: 0 to 1, how high (1) or low (0) the cloud mass sits in frame.';
-
-    const res = await fetch(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: {
-          responseMimeType: 'application/json',
-          responseSchema: schema,
-        },
-      }),
-    });
-
-    if (!res.ok) {
-      if (res.status === 400 || res.status === 403) {
-        throw new Error('Gemini rejected the request — check your API key.');
-      }
-      if (res.status === 404) {
-        throw new Error('Gemini model not found for this key — it may not have Gemini API access enabled yet.');
-      }
-      if (res.status === 429) {
-        throw new Error('Gemini rate limit hit — try again in a moment.');
-      }
-      throw new Error(`Gemini request failed (${res.status}).`);
-    }
-
-    const data = await res.json();
-    const raw = data && data.candidates && data.candidates[0]
-      && data.candidates[0].content && data.candidates[0].content.parts
-      && data.candidates[0].content.parts[0] && data.candidates[0].content.parts[0].text;
-    if (!raw) throw new Error('Gemini returned an empty response.');
-    return JSON.parse(raw);
-  }
-
-  async function generateCloud() {
-    const text = (textInput.value || '').trim();
-    const apiKey = (apiKeyInput.value || '').trim();
-
-    if (!text) {
-      setStatus('Type a short phrase first.', true);
-      return;
-    }
-    if (text.length > 20) {
-      setStatus('Keep it to 20 characters or fewer.', true);
-      return;
-    }
-    if (!apiKey) {
-      setStatus('Enter your Gemini API key.', true);
-      return;
-    }
-    if (!gl) {
-      setStatus('WebGL is not available in this browser.', true);
-      return;
-    }
-
-    generateBtn.disabled = true;
-    descriptionEl.hidden = true;
-    setStatus('Asking Gemini to imagine the fog...', false);
-
-    try {
-      const result = await callGemini(apiKey, text);
-      params = {
-        color: hexToRgb(result.colorHex) || params.color,
-        density: clamp01(result.density),
-        puffiness: clamp01(result.puffiness),
-        turbulence: clamp01(result.turbulence),
-        height: clamp01(result.height),
-      };
-      if (result.description) {
-        descriptionEl.textContent = result.description;
-        descriptionEl.hidden = false;
-      }
-      setStatus('', false);
-    } catch (err) {
-      setStatus(err.message || 'Something went wrong talking to Gemini.', true);
-    } finally {
-      generateBtn.disabled = false;
-    }
-  }
-
-  generateBtn.addEventListener('click', generateCloud);
-  textInput.addEventListener('keydown', (evt) => {
-    if (evt.key === 'Enter') generateCloud();
-  });
-
-  // While "Remember key" is on, the stored key tracks whatever is typed;
-  // turning it off forgets the key in this browser right away.
-  function syncStoredKey() {
-    const apiKey = (apiKeyInput.value || '').trim();
-    try {
-      if (rememberKeyToggle.checked && apiKey) {
-        localStorage.setItem(STORAGE_KEY, apiKey);
-      } else {
-        localStorage.removeItem(STORAGE_KEY);
-      }
-    } catch (e) {
-      if (rememberKeyToggle.checked) {
-        rememberKeyToggle.checked = false;
-        setStatus('Could not remember the key (local storage unavailable).', true);
-      }
-    }
-  }
-
-  rememberKeyToggle.addEventListener('change', syncStoredKey);
-  apiKeyInput.addEventListener('input', () => {
-    if (rememberKeyToggle.checked) syncStoredKey();
-  });
 });
