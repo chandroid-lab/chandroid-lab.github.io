@@ -4,9 +4,10 @@ Usage (needs numpy, trimesh, fast_simplification):
     xacro spot_description/urdf/spot.urdf.xacro arm:=true > spot_arm.urdf
     python tools/build_spot.py <spot_description checkout> spot_arm.urdf models/spot.bin
 
-Static links (body + legs in a standing pose) are merged into one mesh in the body
-frame; arm links are exported in their own link frames together with the joint chain
-so the page can animate them.
+Links rigidly bolted to the body are merged into one mesh in the body frame; every
+link behind a revolute joint (the four legs and the arm) is exported in its own link
+frame together with the joint chain, so the page can pose it. The header also carries
+each leg's joint names and foot contact point, which is what the gait IK needs.
 """
 import json
 import math
@@ -131,13 +132,21 @@ def main():
     links = {l.get('name'): l for l in root.findall('link')}
     joint_by_child = {j.find('child').get('link'): j for j in root.findall('joint')}
 
-    def is_arm(link):
+    def moves(link):
+        """True if a revolute joint sits between this link and the body."""
         while link in joint_by_child:
             j = joint_by_child[link]
-            if j.get('name') == 'arm_sh0':
+            if j.get('type') == 'revolute':
                 return True
             link = j.find('parent').get('link')
         return False
+
+    def depth(link):
+        d = 0
+        while link in joint_by_child:
+            d += 1
+            link = joint_by_child[link].find('parent').get('link')
+        return d
 
     def leg_q(joint_name):
         for key, q in LEG_POSE.items():
@@ -155,48 +164,78 @@ def main():
             t = t @ axis_rot(axis, leg_q(j.get('name')))
         return t
 
-    static_v, static_f, static_m = [], [], []
-    base = 0
-    arm_meshes = []
+    def foot_contact(link):
+        """Bottom of the rubber ball on a lower leg, in that link's frame."""
+        for col in links[link].findall('collision'):
+            sphere = col.find('geometry/sphere')
+            if sphere is None:
+                continue
+            o = origin_tf(col)
+            return [o[0, 3], o[1, 3], o[2, 3] - float(sphere.get('radius'))]
+        raise SystemExit(f'no contact sphere on {link}')
+
+    geos = {}
     for name, el in links.items():
-        if is_arm(name):
-            continue
         geo = link_geometry(el, budget(name))
-        if geo is None:
+        if geo is not None:
+            geos[name] = geo
+
+    # In the standing pose the feet rest on the ground, so the page lifts the body
+    # by -footZ to put them there.
+    foot_z = min(
+        (((tf[:3, :3] @ v.T).T + tf[:3, 3])[:, 2].min())
+        for name, (v, f, m) in geos.items()
+        for tf in [fk_static(name)]
+    )
+
+    static_v, static_n, static_f, static_m = [], [], [], []
+    base = 0
+    for name, (v, f, m) in geos.items():
+        if moves(name):
             continue
-        v, f, m = geo
         tf = fk_static(name)
         n = (tf[:3, :3] @ trimesh.Trimesh(v, f, process=False).vertex_normals.T).T
-        static_v.append(((tf[:3, :3] @ v.T).T + tf[:3, 3], n))
+        static_v.append((tf[:3, :3] @ v.T).T + tf[:3, 3])
+        static_n.append(n)
         static_f.append(f + base)
         static_m.append(m)
         base += len(v)
 
-    sv = np.concatenate([p[0] for p in static_v])
-    foot_z = sv[:, 2].min()
-
-    meshes = [('base', None, sv, np.concatenate([p[1] for p in static_v]),
+    meshes = [('base', None, np.concatenate(static_v), np.concatenate(static_n),
                np.concatenate(static_f), np.concatenate(static_m))]
 
     chain = []
-    for j in root.findall('joint'):
+    # Shallowest first, so the page can walk the chain in one pass.
+    for j in sorted(root.findall('joint'), key=lambda j: depth(j.find('child').get('link'))):
         child = j.find('child').get('link')
-        if not is_arm(child):
+        if not moves(child):
             continue
         axis_el = j.find('axis')
-        chain.append({
+        limit_el = j.find('limit')
+        entry = {
             'joint': j.get('name'),
             'type': j.get('type'),
             'parent': j.find('parent').get('link'),
             'link': child,
             'origin': origin_tf(j).T.reshape(-1).tolist(),  # column-major
             'axis': [float(v) for v in axis_el.get('xyz').split()] if axis_el is not None else [0, 0, 1],
-        })
-        geo = link_geometry(links[child], budget(child))
-        if geo is not None:
-            v, f, m = geo
+        }
+        if limit_el is not None:
+            entry['limit'] = [float(limit_el.get('lower')), float(limit_el.get('upper'))]
+        chain.append(entry)
+        if child in geos:
+            v, f, m = geos[child]
             n = trimesh.Trimesh(v, f, process=False).vertex_normals
             meshes.append((child, child, v, n, f, m))
+
+    legs = [{
+        'name': side,
+        'hipX': f'{side}_hip_x',
+        'hipY': f'{side}_hip_y',
+        'knee': f'{side}_knee',
+        'lowerLeg': f'{side}_lower_leg',
+        'foot': foot_contact(f'{side}_lower_leg'),
+    } for side in ('front_left', 'front_right', 'rear_left', 'rear_right')]
 
     blobs = []
     header_meshes = []
@@ -239,8 +278,10 @@ def main():
     header = json.dumps({
         'source': 'RAI Institute spot_description (MIT / BSD-3-Clause)',
         'footZ': float(foot_z),
+        'standPose': LEG_POSE,
         'meshes': header_meshes,
         'chain': chain,
+        'legs': legs,
     }, separators=(',', ':')).encode()
     header += b' ' * ((-len(header)) % 4)
     with open(OUT, 'wb') as fo:

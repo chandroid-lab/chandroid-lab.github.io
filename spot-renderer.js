@@ -2,7 +2,8 @@
 // tools/build_spot.py into models/spot.bin) into an offscreen texture: RGB is
 // the lit surface color, alpha is the distance from the camera / MAX_DIST.
 // The fog shader in cloud-playground.js composites that texture, so fog in
-// front of the robot covers it and fog behind it doesn't.
+// front of the robot covers it and fog behind it doesn't. The pose comes from
+// outside (spot-gait.js); this file only puts the links where it says.
 window.createSpotRenderer = function (gl, url) {
   const MAX_DIST = 20.0;
   const NEAR = 0.05;
@@ -167,7 +168,8 @@ window.createSpotRenderer = function (gl, url) {
 
   let meshes = null;
   let chain = null;
-  let bodyLift = 0;
+  // The baked kinematics, handed to the gait solver once the model is in.
+  let model = null;
   let loading = false;
 
   function parse(buffer) {
@@ -178,8 +180,13 @@ window.createSpotRenderer = function (gl, url) {
     const header = JSON.parse(new TextDecoder().decode(new Uint8Array(buffer, 8, headerLen)));
     const base = 8 + headerLen;
 
-    bodyLift = -header.footZ;
     chain = header.chain.map((j) => ({ ...j, origin: new Float32Array(j.origin) }));
+    model = {
+      footZ: header.footZ,
+      standPose: header.standPose,
+      legs: header.legs,
+      chain,
+    };
     meshes = header.meshes
       .filter((m) => !m.index32 || hasUint32)
       .map((m) => {
@@ -222,41 +229,42 @@ window.createSpotRenderer = function (gl, url) {
 
   // --- Pose ------------------------------------------------------------------
 
-  // A slow idle loop: the arm looks around, the wrist nods, the gripper
-  // opens and closes. Angles are around each joint's URDF axis.
-  function armPose(t) {
-    const sh1 = -1.85 + 0.12 * Math.sin(t * 0.6);
-    const el0 = 2.1 - 0.18 * Math.sin(t * 0.6 + 1.2);
-    return {
-      arm_sh0: 0.55 * Math.sin(t * 0.35),
-      arm_sh1: sh1,
-      arm_el0: el0,
-      arm_el1: 0.15 * Math.sin(t * 0.45),
-      arm_wr0: 0.55 - (sh1 + el0) * 0.3 + 0.25 * Math.sin(t * 0.8 + 0.5),
-      arm_wr1: 0.3 * Math.sin(t * 0.5 + 2.0),
-      arm_f1x: -0.25 - 0.45 * (0.5 + 0.5 * Math.sin(t * 1.1)),
-    };
+  // The body's place in the scene. URDF is z-up; the scene is y-up. Columns:
+  // where body x, y, z land. The fog shader's camera is left-handed (looking
+  // down +z, screen right is +x), so this includes a flip that keeps Spot
+  // from showing mirrored.
+  function bodyMatrix(pose) {
+    const c = Math.cos(pose.yaw);
+    const s = Math.sin(pose.yaw);
+    const stance = new Float32Array([
+      c, 0, -s, 0,
+      s, 0, c, 0,
+      0, 1, 0, 0,
+      pose.pos[0], pose.pos[1], pose.pos[2], 1,
+    ]);
+    // Pitch and roll are about the body's own axes, so they go on the inside.
+    return mul(stance, mul(axisAngle([0, 1, 0], pose.pitch || 0),
+      axisAngle([1, 0, 0], pose.roll || 0)));
   }
 
-  function linkTransforms(worldFromBody, t) {
-    const q = armPose(t);
+  function linkTransforms(worldFromBody, joints) {
     const out = { body: worldFromBody };
     chain.forEach((j) => {
       let m = mul(out[j.parent], j.origin);
-      if (j.type === 'revolute') m = mul(m, axisAngle(j.axis, q[j.joint] || 0));
+      if (j.type === 'revolute') m = mul(m, axisAngle(j.axis, joints[j.joint] || 0));
       out[j.link] = m;
     });
     return out;
   }
 
   function render(opts) {
-    const { width, height, time, camera, spotPos, spotYaw } = opts;
+    const { width, height, camera, pose } = opts;
     resizeTarget(width, height);
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
     gl.viewport(0, 0, width, height);
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-    if (!meshes) {
+    if (!meshes || !pose) {
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       return false;
     }
@@ -265,18 +273,7 @@ window.createSpotRenderer = function (gl, url) {
     gl.enable(gl.DEPTH_TEST);
     gl.disable(gl.CULL_FACE);
 
-    const c = Math.cos(spotYaw);
-    const s = Math.sin(spotYaw);
-    // URDF is z-up; the scene is y-up. Columns: where body x, y, z land.
-    // The fog shader's camera is left-handed (looking down +z, screen right
-    // is +x), so this includes a flip that keeps Spot from showing mirrored.
-    const worldFromBody = new Float32Array([
-      c, 0, -s, 0,
-      s, 0, c, 0,
-      0, 1, 0, 0,
-      spotPos[0], spotPos[1] + bodyLift, spotPos[2], 1,
-    ]);
-    const transforms = linkTransforms(worldFromBody, time);
+    const transforms = linkTransforms(bodyMatrix(pose), pose.joints);
 
     gl.uniform3fv(uni.uCamPos, camera.pos);
     gl.uniform3fv(uni.uCamRight, camera.right);
@@ -308,5 +305,19 @@ window.createSpotRenderer = function (gl, url) {
     return true;
   }
 
-  return { load, render, texture, maxDistance: MAX_DIST };
+  // Where one link sits in the scene for a given pose, without drawing
+  // anything: the page rides the arm camera on this.
+  function linkTransform(pose, link) {
+    if (!chain || !pose) return null;
+    return linkTransforms(bodyMatrix(pose), pose.joints)[link] || null;
+  }
+
+  return {
+    load,
+    render,
+    linkTransform,
+    texture,
+    maxDistance: MAX_DIST,
+    getModel: () => model,
+  };
 };

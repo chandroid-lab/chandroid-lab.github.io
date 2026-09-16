@@ -3,6 +3,10 @@ document.addEventListener('DOMContentLoaded', () => {
   if (!canvas) return;
 
   const statusEl = document.getElementById('cloud-status');
+  const formEl = document.getElementById('cloud-form');
+  const inputEl = document.getElementById('cloud-input');
+  const povEl = document.getElementById('cloud-pov');
+  const povTagEl = document.getElementById('cloud-povtag');
 
   // Visitors used to paste their own Gemini key; drop any copy left behind.
   try {
@@ -19,7 +23,8 @@ document.addEventListener('DOMContentLoaded', () => {
     height: 0.2,
   };
 
-  // Spot stands on the ground plane (y = 0); the scene is in meters.
+  // Where Spot starts on the ground plane (y = 0); the scene is in meters.
+  // From here on spot-gait.js owns its pose, and the fog follows it.
   const SPOT_POS = [0.1, 0, 2.35];
   const SPOT_YAW = 2.5;
   const SPOT_MAX_DIST = 20;
@@ -32,6 +37,11 @@ document.addEventListener('DOMContentLoaded', () => {
     pitch: -0.14,
   };
   const MIN_CAMERA_Y = 0.15;
+  // Riding the gripper camera: the free camera is parked here until you come back.
+  let pov = false;
+  let parkedCamera = null;
+  // Only the arm camera rolls; the free camera keeps the horizon level.
+  let camRoll = 0;
   const keys = Object.create(null);
   let dragging = false;
   let lastPointerX = 0;
@@ -67,6 +77,7 @@ document.addEventListener('DOMContentLoaded', () => {
     uniform vec3 uCamPos;
     uniform float uYaw;
     uniform float uPitch;
+    uniform float uRoll;
 
     float hash(vec3 p) {
       p = fract(p * 0.3183099 + 0.1);
@@ -190,8 +201,12 @@ document.addEventListener('DOMContentLoaded', () => {
       vec2 uv = (gl_FragCoord.xy - 0.5 * uResolution) / uResolution.y;
 
       vec3 forward = vec3(sin(uYaw) * cos(uPitch), sin(uPitch), cos(uYaw) * cos(uPitch));
-      vec3 right = normalize(vec3(cos(uYaw), 0.0, -sin(uYaw)));
-      vec3 up = cross(forward, right);
+      vec3 level = normalize(vec3(cos(uYaw), 0.0, -sin(uYaw)));
+      vec3 sky = cross(forward, level);
+      // Rolling the basis about the view axis is what lets the arm camera tip
+      // the horizon over; it stays zero for the free camera.
+      vec3 right = cos(uRoll) * level - sin(uRoll) * sky;
+      vec3 up = cos(uRoll) * sky + sin(uRoll) * level;
       vec3 ro = uCamPos;
       vec3 rd = normalize(forward + uv.x * right + uv.y * up);
 
@@ -236,10 +251,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const gl = canvas.getContext('webgl');
   let uResolution, uTime, uCloudColor, uDensity, uPuffiness, uTurbulence, uHeight;
-  let uCamPos, uYaw, uPitch;
+  let uCamPos, uYaw, uPitch, uRoll;
   let uSpotTex, uSpotLoaded, uSpotPos, uSpotYaw;
   let fogProgram, quadBuffer, quadPosLoc;
   let spot = null;
+  let gait = null;
 
   function compileShader(type, src) {
     const sh = gl.createShader(type);
@@ -306,6 +322,7 @@ document.addEventListener('DOMContentLoaded', () => {
     uCamPos = gl.getUniformLocation(program, 'uCamPos');
     uYaw = gl.getUniformLocation(program, 'uYaw');
     uPitch = gl.getUniformLocation(program, 'uPitch');
+    uRoll = gl.getUniformLocation(program, 'uRoll');
 
     resize();
     window.addEventListener('resize', resize);
@@ -324,7 +341,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function updateCamera(dt) {
-    if (!dt) return;
+    if (!dt || pov) return;
     const forwardAmt = (keys['w'] || keys['arrowup'] ? 1 : 0) - (keys['s'] || keys['arrowdown'] ? 1 : 0);
     const strafeAmt = (keys['d'] || keys['arrowright'] ? 1 : 0) - (keys['a'] || keys['arrowleft'] ? 1 : 0);
     if (!forwardAmt && !strafeAmt) return;
@@ -336,6 +353,27 @@ document.addEventListener('DOMContentLoaded', () => {
     camera.pos[1] += forward[1] * forwardAmt * dist;
     camera.pos[2] += (forward[2] * forwardAmt + right[2] * strafeAmt) * dist;
     camera.pos[1] = Math.max(MIN_CAMERA_Y, camera.pos[1]);
+  }
+
+  // While Spot is walking it would otherwise stroll straight out of frame, so
+  // the camera eases its heading to keep up. It never moves itself, stops
+  // inside a dead zone so small steps don't drag the view around, and a drag
+  // always wins.
+  const TRACK_DEAD_ZONE = 0.22;
+
+  function trackSpot(dt, pose) {
+    if (!dt || !pose || dragging || pov || !gait) return;
+    if (Math.abs(gait.state.speed) < 0.05 && Math.abs(gait.state.turn) < 0.05) return;
+    const dx = pose.pos[0] - camera.pos[0];
+    const dz = pose.pos[2] - camera.pos[2];
+    if (Math.hypot(dx, dz) < 1.2) return;
+    // Camera forward is (sin yaw, *, cos yaw).
+    let err = Math.atan2(dx, dz) - camera.yaw;
+    while (err > Math.PI) err -= 2 * Math.PI;
+    while (err < -Math.PI) err += 2 * Math.PI;
+    if (Math.abs(err) < TRACK_DEAD_ZONE) return;
+    const aim = err - Math.sign(err) * TRACK_DEAD_ZONE;
+    camera.yaw += Math.max(-1.2, Math.min(1.2, aim * 2.2)) * dt;
   }
 
   // Pinch spread/pinch on mobile dollies forward/back along the view
@@ -364,24 +402,41 @@ document.addEventListener('DOMContentLoaded', () => {
     resize();
     const time = t * 0.001;
 
+    // The gait solver needs the link lengths out of the model file, so it can
+    // only be built once that has landed.
+    if (spot && !gait && spot.getModel()) {
+      gait = window.createSpotGait(spot.getModel(), { pos: SPOT_POS, yaw: SPOT_YAW });
+      gait.setLook(pov);
+      if (pendingText) {
+        applyText(pendingText);
+        pendingText = '';
+      }
+    }
+
     let spotDrawn = false;
+    const pose = gait ? gait.update(dt, time) : null;
+    trackSpot(dt, pose);
+    if (pov && pose) rideHandCamera(pose);
     if (spot) {
       const cy = Math.cos(camera.yaw);
       const sy = Math.sin(camera.yaw);
       const cp = Math.cos(camera.pitch);
       const sp = Math.sin(camera.pitch);
-      // Same basis as the fog shader: up = cross(forward, right).
+      const cr = Math.cos(camRoll);
+      const sr = Math.sin(camRoll);
+      // Same basis the fog shader builds: level/sky from yaw and pitch, then
+      // both rolled about the view axis.
+      const level = [cy, 0, -sy];
+      const sky = [-sp * sy, cp, -sp * cy];
       spotDrawn = spot.render({
         width: canvas.width,
         height: canvas.height,
-        time,
-        spotPos: SPOT_POS,
-        spotYaw: SPOT_YAW,
+        pose,
         camera: {
           pos: camera.pos,
           forward: [sy * cp, sp, cy * cp],
-          right: [cy, 0, -sy],
-          up: [-sp * sy, cp, -sp * cy],
+          right: [cr * level[0] - sr * sky[0], cr * level[1] - sr * sky[1], cr * level[2] - sr * sky[2]],
+          up: [cr * sky[0] + sr * level[0], cr * sky[1] + sr * level[1], cr * sky[2] + sr * level[2]],
         },
       });
     }
@@ -395,8 +450,9 @@ document.addEventListener('DOMContentLoaded', () => {
     gl.bindTexture(gl.TEXTURE_2D, spot ? spot.texture : null);
     gl.uniform1i(uSpotTex, 0);
     gl.uniform1f(uSpotLoaded, spotDrawn ? 1 : 0);
-    gl.uniform3f(uSpotPos, SPOT_POS[0], SPOT_POS[1], SPOT_POS[2]);
-    gl.uniform1f(uSpotYaw, SPOT_YAW);
+    const spotPos = pose ? pose.pos : SPOT_POS;
+    gl.uniform3f(uSpotPos, spotPos[0], 0, spotPos[2]);
+    gl.uniform1f(uSpotYaw, pose ? pose.yaw : SPOT_YAW);
     gl.uniform2f(uResolution, canvas.width, canvas.height);
     gl.uniform1f(uTime, time);
     gl.uniform3f(uCloudColor, params.color[0], params.color[1], params.color[2]);
@@ -407,6 +463,7 @@ document.addEventListener('DOMContentLoaded', () => {
     gl.uniform3f(uCamPos, camera.pos[0], camera.pos[1], camera.pos[2]);
     gl.uniform1f(uYaw, camera.yaw);
     gl.uniform1f(uPitch, camera.pitch);
+    gl.uniform1f(uRoll, camRoll);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     requestAnimationFrame(frame);
   }
@@ -527,12 +584,115 @@ document.addEventListener('DOMContentLoaded', () => {
     canvas.addEventListener('click', () => canvas.focus());
   }
 
+  // --- arm camera ------------------------------------------------------------
+
+  // Mounted on top of the gripper housing, in the wrist link's frame, looking
+  // out along it — roughly where Spot's real hand camera sits. The shader's
+  // vertical half-angle is atan(0.5), so sitting 34mm above the housing and
+  // 50mm behind its front edge leaves the open jaws across the bottom of the
+  // frame, which is roughly what a real gripper camera sees of itself.
+  const HAND_EYE = [0.185, 0, 0.072];
+  const HAND_LINK = 'arm_link_wr1';
+
+  function rideHandCamera(pose) {
+    const m = spot && spot.linkTransform(pose, HAND_LINK);
+    if (!m) return;
+    // Column-major: columns 0-2 are the link axes in the scene, column 3 its origin.
+    const len = Math.hypot(m[0], m[1], m[2]) || 1;
+    const fx = m[0] / len;
+    const fy = m[1] / len;
+    const fz = m[2] / len;
+    camera.pos[0] = m[12] + m[0] * HAND_EYE[0] + m[4] * HAND_EYE[1] + m[8] * HAND_EYE[2];
+    camera.pos[1] = m[13] + m[1] * HAND_EYE[0] + m[5] * HAND_EYE[1] + m[9] * HAND_EYE[2];
+    camera.pos[2] = m[14] + m[2] * HAND_EYE[0] + m[6] * HAND_EYE[1] + m[10] * HAND_EYE[2];
+    // No pitch clamp here: the drag limit exists to keep you from flipping the
+    // free camera, and the arm is allowed to point wherever it likes.
+    camera.yaw = Math.atan2(fx, fz);
+    camera.pitch = Math.asin(Math.max(-1, Math.min(1, fy)));
+    // How far the gripper's own up axis has twisted off the level basis.
+    const cy = Math.cos(camera.yaw);
+    const sy = Math.sin(camera.yaw);
+    const cp = Math.cos(camera.pitch);
+    const sp = Math.sin(camera.pitch);
+    const ulen = Math.hypot(m[8], m[9], m[10]) || 1;
+    const ux = m[8] / ulen;
+    const uy = m[9] / ulen;
+    const uz = m[10] / ulen;
+    camRoll = Math.atan2(ux * cy - uz * sy, -ux * sp * sy + uy * cp - uz * sp * cy);
+  }
+
+  function setPov(on) {
+    if (on === pov) return;
+    pov = on;
+    if (pov) {
+      parkedCamera = { pos: camera.pos.slice(), yaw: camera.yaw, pitch: camera.pitch };
+    } else if (parkedCamera) {
+      camRoll = 0;
+      camera.pos = parkedCamera.pos;
+      camera.yaw = parkedCamera.yaw;
+      camera.pitch = parkedCamera.pitch;
+      parkedCamera = null;
+    }
+    if (gait) gait.setLook(pov);
+    if (povTagEl) povTagEl.hidden = !pov;
+    if (povEl) {
+      povEl.setAttribute('aria-pressed', pov ? 'true' : 'false');
+      povEl.title = pov ? 'Back to the free camera (Esc)' : 'Look through the arm camera';
+    }
+  }
+
+  function setupPov() {
+    if (!povEl) return;
+    povEl.addEventListener('click', () => {
+      setPov(!pov);
+      canvas.focus();
+    });
+    canvas.addEventListener('keydown', (evt) => {
+      if (evt.key === 'Escape' && pov) {
+        evt.preventDefault();
+        setPov(false);
+      }
+    });
+  }
+
+  // --- text -> locomotion ----------------------------------------------------
+
+  // Parsing lives in the gait solver, so a phrase typed before the model has
+  // landed waits here and runs the moment the solver exists.
+  let pendingText = '';
+
+  function applyText(text) {
+    const parsed = gait.parse(text);
+    if (!parsed) {
+      setStatus('Not sure what that means \u2014 try "trot forward", "sneak left", or "stop".', true);
+      return;
+    }
+    setStatus(gait.setCommand(parsed));
+  }
+
+  function setupPrompt() {
+    if (!formEl || !inputEl) return;
+    formEl.addEventListener('submit', (evt) => {
+      evt.preventDefault();
+      const text = inputEl.value.trim();
+      if (!text) return;
+      if (!gait) {
+        pendingText = text;
+        setStatus('Waiting for the robot to load\u2026');
+        return;
+      }
+      applyText(text);
+    });
+  }
+
   if (!gl) {
     setStatus('WebGL is not available in this browser.', true);
   } else {
     try {
       initGL();
       setupControls();
+      setupPrompt();
+      setupPov();
 
       new IntersectionObserver((entries) => {
         canvasIntersecting = entries[0].isIntersecting;
