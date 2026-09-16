@@ -48,12 +48,13 @@ window.createSpotRenderer = function (gl, url) {
   const FRAG_SRC = `
     precision highp float;
     uniform vec3 uCamPos;
+    // The body paint, so two robots in the same scene can be told apart.
+    uniform vec3 uPaint;
     varying vec3 vWorld;
     varying vec3 vNormal;
     varying float vMat;
 
     const vec3 SUN_DIR = normalize(vec3(0.4, 0.65, -0.35));
-    const vec3 SPOT_YELLOW = vec3(0.9, 0.68, 0.2);
     const vec3 SPOT_DARK = vec3(0.09, 0.09, 0.1);
 
     void main() {
@@ -63,7 +64,7 @@ window.createSpotRenderer = function (gl, url) {
       if (dot(n, v) < 0.0) n = -n;
 
       bool yellow = vMat > 0.5;
-      vec3 albedo = yellow ? SPOT_YELLOW : SPOT_DARK;
+      vec3 albedo = yellow ? uPaint : SPOT_DARK;
       float diff = max(dot(n, SUN_DIR), 0.0);
       float sky = 0.5 + 0.5 * n.y;
       float spec = pow(max(dot(n, normalize(SUN_DIR + v)), 0.0), yellow ? 48.0 : 24.0);
@@ -130,7 +131,7 @@ window.createSpotRenderer = function (gl, url) {
     mat: gl.getAttribLocation(program, 'aMat'),
   };
   const uni = {};
-  ['uModel', 'uMin', 'uSpan', 'uCamPos', 'uCamRight', 'uCamUp', 'uCamFwd', 'uAspect'].forEach((name) => {
+  ['uModel', 'uMin', 'uSpan', 'uCamPos', 'uCamRight', 'uCamUp', 'uCamFwd', 'uAspect', 'uPaint'].forEach((name) => {
     uni[name] = gl.getUniformLocation(program, name);
   });
 
@@ -257,14 +258,20 @@ window.createSpotRenderer = function (gl, url) {
     return out;
   }
 
+  const SPOT_YELLOW = [0.9, 0.68, 0.2];
+
+  // opts.poses is every robot in the scene; they share one target, so the
+  // depth test sorts them against each other for free. A pose may carry a
+  // `paint` color; without one it's Spot yellow.
   function render(opts) {
-    const { width, height, camera, pose } = opts;
+    const { width, height, camera } = opts;
+    const poses = (opts.poses || [opts.pose]).filter(Boolean);
     resizeTarget(width, height);
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
     gl.viewport(0, 0, width, height);
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-    if (!meshes || !pose) {
+    if (!meshes || !poses.length) {
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       return false;
     }
@@ -272,8 +279,6 @@ window.createSpotRenderer = function (gl, url) {
     gl.useProgram(program);
     gl.enable(gl.DEPTH_TEST);
     gl.disable(gl.CULL_FACE);
-
-    const transforms = linkTransforms(bodyMatrix(pose), pose.joints);
 
     gl.uniform3fv(uni.uCamPos, camera.pos);
     gl.uniform3fv(uni.uCamRight, camera.right);
@@ -284,18 +289,22 @@ window.createSpotRenderer = function (gl, url) {
     gl.enableVertexAttribArray(attr.pos);
     gl.enableVertexAttribArray(attr.normal);
     gl.enableVertexAttribArray(attr.mat);
-    meshes.forEach((m) => {
-      gl.uniformMatrix4fv(uni.uModel, false, transforms[m.link || 'body']);
-      gl.uniform3fv(uni.uMin, m.min);
-      gl.uniform3fv(uni.uSpan, m.span);
-      gl.bindBuffer(gl.ARRAY_BUFFER, m.pos);
-      gl.vertexAttribPointer(attr.pos, 3, gl.SHORT, false, 0, 0);
-      gl.bindBuffer(gl.ARRAY_BUFFER, m.normal);
-      gl.vertexAttribPointer(attr.normal, 3, gl.BYTE, true, 0, 0);
-      gl.bindBuffer(gl.ARRAY_BUFFER, m.mat);
-      gl.vertexAttribPointer(attr.mat, 1, gl.UNSIGNED_BYTE, false, 0, 0);
-      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, m.index);
-      gl.drawElements(gl.TRIANGLES, m.count, m.indexType, 0);
+    poses.forEach((pose) => {
+      const transforms = linkTransforms(bodyMatrix(pose), pose.joints);
+      gl.uniform3fv(uni.uPaint, pose.paint || SPOT_YELLOW);
+      meshes.forEach((m) => {
+        gl.uniformMatrix4fv(uni.uModel, false, transforms[m.link || 'body']);
+        gl.uniform3fv(uni.uMin, m.min);
+        gl.uniform3fv(uni.uSpan, m.span);
+        gl.bindBuffer(gl.ARRAY_BUFFER, m.pos);
+        gl.vertexAttribPointer(attr.pos, 3, gl.SHORT, false, 0, 0);
+        gl.bindBuffer(gl.ARRAY_BUFFER, m.normal);
+        gl.vertexAttribPointer(attr.normal, 3, gl.BYTE, true, 0, 0);
+        gl.bindBuffer(gl.ARRAY_BUFFER, m.mat);
+        gl.vertexAttribPointer(attr.mat, 1, gl.UNSIGNED_BYTE, false, 0, 0);
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, m.index);
+        gl.drawElements(gl.TRIANGLES, m.count, m.indexType, 0);
+      });
     });
     gl.disableVertexAttribArray(attr.normal);
     gl.disableVertexAttribArray(attr.mat);

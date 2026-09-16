@@ -313,6 +313,21 @@ html {
   pointer-events: none;
 }
 
+/* The name of the place, top right, in the same voice as the camera tag. */
+.cloud-site {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.85);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+}
+
 /* display:flex above would otherwise beat the hidden attribute. */
 .cloud-povtag[hidden] {
   display: none;
