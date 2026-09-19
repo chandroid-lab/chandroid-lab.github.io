@@ -113,6 +113,10 @@ window.createSpotGait = function (model, start) {
       // The legs hold their ground under it, so this is the robot dropping a
       // shoulder rather than the whole body tipping over.
       bank: 0,
+      // Height added to the whole robot, legs and all. Everything else here
+      // keeps the feet on the ground; this is the one thing that takes them
+      // off it, which is the only way a leap can actually leave the floor.
+      lift: 0,
       arm: 'auto',
       armAmp: 1,
       label: 'standing',
@@ -133,6 +137,7 @@ window.createSpotGait = function (model, start) {
     stepHeight: 0.09,
     lean: 0,
     bank: 0,
+    lift: 0,
     armAmp: 1,
     // Free-running so the arm keeps swinging while Spot stands still.
     armPhase: 0,
@@ -156,7 +161,7 @@ window.createSpotGait = function (model, start) {
   const NUMERIC = {
     speed: [-2.2, 2.2], strafe: [-1.5, 1.5], turn: [-3, 3], height: HEIGHT_RANGE,
     stepHeight: [0.03, 0.2], cadence: [0.5, 1.6], lean: [-0.2, 0.2], armAmp: [0.2, 2],
-    tau: [0.06, 1], bank: [-0.45, 0.45],
+    tau: [0.06, 1], bank: [-0.45, 0.45], lift: [0, 0.45],
   };
 
   function sanitize(next) {
@@ -318,6 +323,7 @@ window.createSpotGait = function (model, start) {
     state.stepHeight += (command.stepHeight - state.stepHeight) * ease;
     state.lean += (command.lean - state.lean) * ease;
     state.bank += (command.bank - state.bank) * ease;
+    state.lift += (command.lift - state.lift) * ease;
     state.armAmp += (command.armAmp - state.armAmp) * ease;
     state.turn += (command.turn - state.turn) * ease;
 
@@ -404,7 +410,10 @@ window.createSpotGait = function (model, start) {
       state.armAmp, clamp(planar / 1.6, 0, 1), step);
 
     pose.pos[0] = state.pos[0];
-    pose.pos[1] = state.height + GROUND_OFFSET + bob;
+    // The legs are solved against a level frame at the body, so lifting the
+    // body here takes the feet with it: they hang where they were rather than
+    // stretching for a ground that has moved away.
+    pose.pos[1] = state.height + GROUND_OFFSET + bob + state.lift;
     pose.pos[2] = state.pos[2];
     pose.yaw = state.yaw;
     pose.pitch = pitch;

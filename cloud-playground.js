@@ -809,7 +809,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // the turn rate and the speed for itself; this is everything else.
   const CRUISE = {
     gait: 'trot', speed: 1.45, strafe: 0, turn: 0, height: 0.50, stepHeight: 0.12,
-    cadence: 1.05, lean: 0.03, bank: 0, tau: 0.3, arm: 'auto', armAmp: 1,
+    cadence: 1.05, lean: 0.03, bank: 0, lift: 0, tau: 0.3, arm: 'auto', armAmp: 1,
     label: 'running',
   };
   const cruise = CRUISE;
@@ -906,15 +906,18 @@ document.addEventListener('DOMContentLoaded', () => {
     ] };
   }
 
-  // Straight over the top of the dive instead of around it.
+  // Straight over the top of the dive instead of around it: gather, leave the
+  // ground, absorb the landing, run on.
   function hurdleMove() {
     return { name: 'hurdling', call: 'goes over the top', cut: 1, steps: [
-      { t: 0.16, cmd: { gait: 'trot', speed: 0.9, height: 0.40, stepHeight: 0.07, cadence: 1.3,
-        lean: -0.05, tau: 0.09, arm: 'stow', label: 'gathering' } },
-      { t: 0.5, cmd: { gait: 'bound', speed: 1.7, height: 0.57, stepHeight: 0.2, cadence: 0.8,
-        lean: 0.1, tau: 0.09, label: 'hurdling' } },
-      { t: 0.45, cmd: { gait: 'bound', speed: 1.9, height: 0.50, stepHeight: 0.15, cadence: 1.2,
-        lean: 0.05, tau: 0.2, label: 'breaking away' } },
+      { t: 0.18, cmd: { gait: 'trot', speed: 0.95, height: 0.39, stepHeight: 0.06, cadence: 1.35,
+        lean: -0.06, lift: 0, tau: 0.08, arm: 'stow', label: 'gathering' } },
+      { t: 0.42, cmd: { gait: 'bound', speed: 1.85, height: 0.47, stepHeight: 0.18, cadence: 1,
+        lean: 0.13, lift: 0.3, tau: 0.07, arm: 'stow', label: 'in the air' } },
+      { t: 0.26, cmd: { gait: 'bound', speed: 1.6, height: 0.42, stepHeight: 0.1, cadence: 1.1,
+        lean: -0.04, lift: 0, tau: 0.08, label: 'landing' } },
+      { t: 0.45, cmd: { gait: 'bound', speed: 1.95, height: 0.50, stepHeight: 0.15, cadence: 1.2,
+        lean: 0.05, lift: 0, tau: 0.2, arm: 'auto', label: 'breaking away' } },
     ] };
   }
 
@@ -1207,8 +1210,13 @@ document.addEventListener('DOMContentLoaded', () => {
         const m = kind === 'spin' ? spinMove(cutSide())
           : kind === 'hurdle' ? hurdleMove()
           : jukeMove(cutSide());
+        // A pad has to answer on the press. Queueing it behind whatever the
+        // chase was already doing means up to a second and a half of nothing
+        // followed by a move at a moment nobody asked for, which reads as the
+        // button being broken. The call takes over instead.
         pending = null;
-        queued.push(m);
+        queued.length = 0;
+        startMove(m);
         flash(`Spot ${m.call}`, 1.2);
         pad.classList.add('lit');
         setTimeout(() => pad.classList.remove('lit'), 140);
