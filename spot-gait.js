@@ -1,10 +1,10 @@
-// Turns a short phrase into a walking Spot.
+// Turns a locomotion command into a walking Spot.
 //
-// parse() maps text onto a locomotion command (gait, speed, turn rate, body
-// height...); update() runs a phase-based gait generator that places each foot
-// on the ground plane and solves the leg IK for it. Every kinematic number
-// comes from the URDF baked into models/spot.bin by tools/build_spot.py, so
-// this file holds no hand-copied link lengths.
+// A command is a gait, a speed, a turn rate, a body height and a few things
+// about how hard to work; update() runs a phase-based gait generator that
+// places each foot on the ground plane and solves the leg IK for it. Every
+// kinematic number comes from the URDF baked into models/spot.bin by
+// tools/build_spot.py, so this file holds no hand-copied link lengths.
 window.createSpotGait = function (model, start) {
   const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
   const smoothstep = (t) => t * t * (3 - 2 * t);
@@ -147,199 +147,12 @@ window.createSpotGait = function (model, start) {
     joints: Object.create(null),
   };
 
-  // --- text -> command -------------------------------------------------------
+  // What the arm can be asked to do, beyond following the gait.
+  const ARM_MODES = ['look', 'swing', 'wave', 'reach', 'stow'];
 
-  // Applied in passes so word order doesn't matter: a style preset first, then
-  // anything the phrase says explicitly overrides it.
-  const STYLES = [
-    { re: /(sneak|stealth|creep|quiet|tiptoe|살금|몰래|조용)/i, c: { gait: 'walk', speed: 0.35, height: 0.40, stepHeight: 0.05, cadence: 0.8, label: 'sneaking' } },
-    { re: /(march|parade|행진|열병)/i, c: { gait: 'walk', speed: 0.6, height: 0.54, stepHeight: 0.17, cadence: 0.9, label: 'marching' } },
-    { re: /(prance|skip|excited|happy|신나|방방|깡충)/i, c: { gait: 'bound', speed: 1.1, height: 0.52, stepHeight: 0.16, cadence: 1.15, label: 'prancing' } },
-    { re: /(tired|limp|slow.?down|지친|피곤|힘없)/i, c: { gait: 'walk', speed: 0.3, height: 0.44, stepHeight: 0.05, cadence: 0.6, label: 'trudging' } },
-    { re: /(patrol|inspect|survey|순찰|정찰)/i, c: { gait: 'walk', speed: 0.55, turn: 0.22, height: 0.52, label: 'patrolling' } },
-    { re: /(sprint|dash|charge|전력|질주)/i, c: { gait: 'bound', speed: 1.8, height: 0.50, stepHeight: 0.14, cadence: 1.2, label: 'sprinting' } },
-  ];
-
-  const VERB = { stand: 'standing', walk: 'walking', trot: 'trotting', pace: 'pacing', bound: 'bounding' };
-
-  // What the arm should be doing, independent of the legs.
-  const ARM_WORDS = [
-    { re: /(\bwave|\bgreet|\bhello|\bhi\b|인사|손 ?흔)/i, arm: 'wave' },
-    { re: /(\bswing|\bsway|\bflail|흔들|휘저)/i, arm: 'swing' },
-    { re: /(\bstow|\btuck|\bfold|접|집어넣|말아)/i, arm: 'stow' },
-    { re: /(\bpoint|\breach|\bextend|뻗|가리키)/i, arm: 'reach' },
-  ];
-  const ARM_SAY = { swing: 'arm swinging', wave: 'arm waving', stow: 'arm stowed', reach: 'arm reaching' };
-
-  const GAIT_WORDS = [
-    { re: /(\bstand|\bhalt|\bstop|\bstay|\bidle|서 ?있|멈|정지|가만)/i, gait: 'stand' },
-    { re: /(trot|속보)/i, gait: 'trot' },
-    { re: /(\bpace|\bamble|측대)/i, gait: 'pace' },
-    { re: /(\bbound|\bgallop|\bleap|\bhop|바운드|도약|뛰어)/i, gait: 'bound' },
-    { re: /(\brun|\bsprint|\bjog|\bdash|달리|달려|뛰)/i, gait: 'bound' },
-    { re: /(\bwalk|\bstep|\bstroll|걷|걸어|보행|성큼)/i, gait: 'walk' },
-  ];
-
-  function parse(text) {
-    const s = (text || '').trim();
-    if (!s) return null;
-    const c = defaultCommand();
-    let hit = false;
-
-    STYLES.forEach((style) => {
-      if (style.re.test(s)) {
-        Object.assign(c, style.c);
-        hit = true;
-      }
-    });
-
-    // First match wins, so "stop walking" stands still instead of walking.
-    const word = GAIT_WORDS.find((g) => g.re.test(s));
-    if (word) {
-      c.gait = word.gait;
-      if (word.gait === 'stand') {
-        c.speed = 0;
-        c.strafe = 0;
-        c.turn = 0;
-        c.label = 'standing';
-      } else if (!c.speed) {
-        c.speed = word.gait === 'walk' ? 0.55 : word.gait === 'bound' ? 1.5 : 0.95;
-        c.label = word.gait === 'bound' ? 'running' : VERB[word.gait];
-      }
-      hit = true;
-    }
-
-    // Direction. "backwards" has to win over a bare "back".
-    if (/(backward|back(?!\s*flip)|reverse|뒤로|후진)/i.test(s)) {
-      if (!c.speed) c.speed = 0.5;
-      c.speed = -Math.abs(c.speed);
-      if (c.gait === 'stand') c.gait = 'walk';
-      c.label = 'backing up';
-      hit = true;
-    } else if (/(forward|ahead|앞으로|전진)/i.test(s)) {
-      if (!c.speed) c.speed = 0.7;
-      c.speed = Math.abs(c.speed);
-      if (c.gait === 'stand') c.gait = 'walk';
-      hit = true;
-    }
-
-    if (/(spin|circle|빙글|제자리.?돌|회전)/i.test(s)) {
-      c.turn = 1.4;
-      if (c.gait === 'stand') c.gait = 'trot';
-      c.label = 'spinning';
-      hit = true;
-    }
-    if (/(left|왼쪽|왼|좌회전|좌로)/i.test(s)) {
-      if (/(strafe|sideways|side.?step|게걸음|옆으로)/i.test(s)) {
-        c.strafe = 0.5;
-        if (c.gait === 'stand') c.gait = 'walk';
-        c.label = 'side-stepping';
-      } else {
-        c.turn = Math.abs(c.turn || 0.6);
-        if (c.gait === 'stand') c.gait = 'walk';
-        if (!c.speed) c.speed = 0.5;
-      }
-      hit = true;
-    } else if (/(right|오른쪽|오른|우회전|우로)/i.test(s)) {
-      if (/(strafe|sideways|side.?step|게걸음|옆으로)/i.test(s)) {
-        c.strafe = -0.5;
-        if (c.gait === 'stand') c.gait = 'walk';
-        c.label = 'side-stepping';
-      } else {
-        c.turn = -Math.abs(c.turn || 0.6);
-        if (c.gait === 'stand') c.gait = 'walk';
-        if (!c.speed) c.speed = 0.5;
-      }
-      hit = true;
-    } else if (/(turn|돌아|돌려)/i.test(s) && !c.turn) {
-      c.turn = 0.6;
-      if (c.gait === 'stand') c.gait = 'walk';
-      if (!c.speed) c.speed = 0.5;
-      hit = true;
-    }
-
-    // Speed words scale whatever the phrase settled on.
-    if (/(slow|gentle|careful|천천|느리|살살)/i.test(s)) {
-      c.speed *= 0.5;
-      c.cadence *= 0.75;
-      hit = true;
-    }
-    if (/(\bfast|\bquick|\bhurry|빨리|빠르|급하)/i.test(s)) {
-      c.speed *= 1.7;
-      c.cadence *= 1.15;
-      hit = true;
-    }
-
-    // The arm takes its own orders. "hardly" keeps its English meaning here:
-    // barely, not hard — "swing the arm hard" is the big one.
-    const armWord = ARM_WORDS.find((a) => a.re.test(s));
-    if (armWord) {
-      // "stop waving" asks for the opposite of "wave".
-      c.arm = word && word.gait === 'stand' ? 'auto' : armWord.arm;
-      hit = true;
-    }
-    if (/(\bhardly|\bbarely|\bslight|\bgentl|\bsoft|\bsmall|\btiny|살짝|살살|조금|약하)/i.test(s)) {
-      c.armAmp = 0.35;
-      hit = true;
-    } else if (/(\bhard\b|\bwild|\bvigorous|\bfierce|\bbig|\bwide|\bstrong|세게|크게|힘차|격하)/i.test(s)) {
-      c.armAmp = 1.7;
-      hit = true;
-    }
-
-    // An explicit speed beats every guess above.
-    const mps = s.match(/(-?\d+(?:\.\d+)?)\s*(m\/s|mps|미터)/i);
-    if (mps) {
-      c.speed = parseFloat(mps[1]);
-      if (c.gait === 'stand') c.gait = Math.abs(c.speed) > 1.2 ? 'bound' : Math.abs(c.speed) > 0.7 ? 'trot' : 'walk';
-      hit = true;
-    }
-
-    if (/(high.?step|\bstomp|\bknee|성큼|높이.?들)/i.test(s)) {
-      c.stepHeight = 0.18;
-      hit = true;
-    } else if (/(\btall|\bhigh|\bstretch|\btiptoe|높게|높이|쭉)/i.test(s)) {
-      c.height = 0.57;
-      hit = true;
-    }
-    if (/(\bcrouch|\blow|\bduck|\bhunker|낮게|낮추|숙여|엎드)/i.test(s)) {
-      c.height = 0.38;
-      hit = true;
-    }
-
-    if (!hit) return null;
-
-    c.speed = clamp(c.speed, -2.2, 2.2);
-    c.strafe = clamp(c.strafe, -1, 1);
-    c.turn = clamp(c.turn, -2, 2);
-    c.height = clamp(c.height, HEIGHT_RANGE[0], HEIGHT_RANGE[1]);
-    c.armAmp = clamp(c.armAmp, 0.2, 2);
-    if (c.gait !== 'stand' && !c.speed && !c.strafe && !c.turn) c.speed = 0.6;
-    if (c.gait === 'stand') c.label = 'standing';
-    return c;
-  }
-
-  // What the visitor sees echoed back, built from the command that will
-  // actually run rather than from whatever words matched.
-  function describe(c) {
-    const arm = c.arm === 'auto' ? '' :
-      ARM_SAY[c.arm] + (c.armAmp > 1.3 ? ' hard' : c.armAmp < 0.6 ? ' gently' : '');
-    if (c.gait === 'stand') {
-      return ['standing still', arm, `body ${c.height.toFixed(2)} m`]
-        .filter(Boolean).join(' \u00b7 ');
-    }
-    const parts = [c.label && c.label !== 'standing' ? c.label : VERB[c.gait]];
-    if (c.speed) parts.push(`${c.speed > 0 ? 'forward' : 'backward'} at ${Math.abs(c.speed).toFixed(2)} m/s`);
-    if (c.strafe) parts.push(`sliding ${c.strafe > 0 ? 'left' : 'right'}`);
-    if (c.turn) parts.push(`turning ${c.turn > 0 ? 'left' : 'right'} ${Math.round(Math.abs(c.turn) * 57.3)}°/s`);
-    if (c.stepHeight > 0.15) parts.push('high steps');
-    if (arm) parts.push(arm);
-    parts.push(`body ${c.height.toFixed(2)} m`);
-    return parts.join(' · ');
-  }
-
-  // Anything that didn't come out of parse() (a queued step, a model reply)
-  // goes through the same limits parse() applies. A NaN would otherwise sail
-  // through clamp() and take the robot's position with it for good.
+  // Every command comes in from the playground, so this is the only thing
+  // standing between a typo and a robot with a NaN for a position — which
+  // clamp() would sail straight through and never recover from.
   const NUMERIC = {
     speed: [-2.2, 2.2], strafe: [-1.5, 1.5], turn: [-3, 3], height: HEIGHT_RANGE,
     stepHeight: [0.03, 0.2], cadence: [0.5, 1.6], lean: [-0.2, 0.2], armAmp: [0.2, 2],
@@ -355,7 +168,7 @@ window.createSpotGait = function (model, start) {
       } else if (key === 'gait') {
         if (GAITS[v]) out.gait = v;
       } else if (key === 'arm') {
-        if (v === 'auto' || ARM_SAY[v]) out.arm = v;
+        if (v === 'auto' || ARM_MODES.indexOf(v) >= 0) out.arm = v;
       } else if (key === 'label') {
         if (typeof v === 'string') out.label = v.slice(0, 40);
       }
@@ -365,7 +178,6 @@ window.createSpotGait = function (model, start) {
 
   function setCommand(next) {
     Object.assign(command, sanitize(next));
-    return describe(command);
   }
 
   // --- gait ------------------------------------------------------------------
@@ -601,7 +413,6 @@ window.createSpotGait = function (model, start) {
   }
 
   return {
-    parse,
     setCommand,
     sanitize,
     // Raises the arm into its camera pose, for the view through the gripper.
@@ -609,7 +420,6 @@ window.createSpotGait = function (model, start) {
     // and all — "stop" hands the steady pose back. `at`, if given, is asked
     // every frame for a point {x, z} to pan the camera toward.
     setLook: (on, at) => { looking = !!on; lookAt = at || null; },
-    describe,
     update,
     command,
     state,

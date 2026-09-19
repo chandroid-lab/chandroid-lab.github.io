@@ -64,21 +64,31 @@
             <tr>
               <td style="padding:8px 16px;width:100%;vertical-align:middle">
                 <div class="cloud-panel">
-                  <form id="cloud-form" class="cloud-form" autocomplete="off">
-                    <input id="cloud-input" class="cloud-input" type="text" maxlength="80"
-                           placeholder="call the move &mdash; &ldquo;juke left&rdquo;, &ldquo;spin&rdquo;, &ldquo;hurdle&rdquo;, &ldquo;sprint&rdquo;, &ldquo;echo, back off&rdquo;">
-                    <button class="cloud-go" type="submit">Go</button>
-                  </form>
-                  <p id="cloud-status" class="cloud-status" hidden></p>
                   <div class="cloud-canvas-wrap">
                     <canvas id="cloud-canvas" class="cloud-canvas" tabindex="0"></canvas>
                     <p id="cloud-povtag" class="cloud-povtag" hidden><span class="cloud-rec"></span>ECHO CAM &middot; Esc</p>
                     <button id="cloud-pov" class="cloud-pov" type="button" aria-pressed="false"
                             aria-label="Look through Echo's arm camera" title="Look through Echo's arm camera">&#9673;</button>
                   </div>
-                  <p class="cloud-hint">Spot carries, Echo chases. Echo runs Spot down, commits to a dive, and Spot cuts out from under it &mdash;
-                    call the cut yourself and the scene slows down on the plant while Echo goes past. A gait generator and leg IK run it all in
-                    the browser &mdash; no model, no server. Drag to look around &middot; WASD or arrow keys to fly &middot; pinch to move forward/back.</p>
+                  <div class="cloud-deck">
+                    <div class="cloud-knob" id="cloud-pace" role="slider" tabindex="0"
+                         aria-label="Chase pace" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"
+                         title="Drag to drive the chase; let go and it runs itself">
+                      <span class="cloud-knob-dial"><i></i></span>
+                      <span class="cloud-knob-label">PACE</span>
+                    </div>
+                    <div class="cloud-pads">
+                      <button class="cloud-pad" type="button" data-move="juke">CUT</button>
+                      <button class="cloud-pad" type="button" data-move="spin">SPIN</button>
+                      <button class="cloud-pad" type="button" data-move="hurdle">LEAP</button>
+                    </div>
+                    <button class="cloud-pad cloud-sound" id="cloud-sound" type="button" aria-pressed="false"
+                            aria-label="Sound" title="Sound">&#9834;</button>
+                  </div>
+                  <p id="cloud-status" class="cloud-status" hidden></p>
+                  <p class="cloud-hint">Spot carries, Echo chases. Echo runs Spot down, commits to a dive, and Spot cuts out from under it.
+                    Turn the pace up and they open it up; let go and the chase drives itself. A gait generator and leg IK run it all in the
+                    browser &mdash; no model, no server. Drag to look around &middot; WASD or arrow keys to fly &middot; pinch to move forward/back.</p>
                 </div>
               </td>
             </tr>
@@ -273,8 +283,9 @@
       </tr>
     </table>
 
+    <script src="chase-audio.js?v=1" defer></script>
     <script src="spot-renderer.js?v=6" defer></script>
-    <script src="spot-gait.js?v=5" defer></script>
-    <script src="cloud-playground.js?v=13" defer></script>
+    <script src="spot-gait.js?v=6" defer></script>
+    <script src="cloud-playground.js?v=14" defer></script>
   </body>
 </html>

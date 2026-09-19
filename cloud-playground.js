@@ -3,8 +3,6 @@ document.addEventListener('DOMContentLoaded', () => {
   if (!canvas) return;
 
   const statusEl = document.getElementById('cloud-status');
-  const formEl = document.getElementById('cloud-form');
-  const inputEl = document.getElementById('cloud-input');
   const povEl = document.getElementById('cloud-pov');
   const povTagEl = document.getElementById('cloud-povtag');
 
@@ -512,10 +510,6 @@ document.addEventListener('DOMContentLoaded', () => {
       echoGait = window.createSpotGait(spot.getModel(), { pos: ECHO_POS, yaw: SPOT_YAW });
       echoGait.pose.paint = ECHO_PAINT;
       updateEchoLook();
-      if (pendingText) {
-        applyText(pendingText);
-        pendingText = '';
-      }
     }
 
     if (spotGait) tickChase(sim);
@@ -599,11 +593,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function stopLoop() {
     looping = false;
+    // Scrolled away or in a background tab: stop making noise about it.
+    if (audio && soundOn) audio.stop();
   }
 
   function syncLoop() {
     if (!contextLost && canvasIntersecting && document.visibilityState !== 'hidden') {
       startLoop();
+      if (audio && soundOn) audio.start();
     } else {
       stopLoop();
     }
@@ -808,15 +805,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const spotPoint = () => ({ x: spotGait.state.pos[0], z: spotGait.state.pos[2] });
 
-  // How Spot runs between cuts. A typed phrase writes into this, so "sprint"
-  // or "sneak" changes the cruise the chase is run at rather than being a
-  // one-off; the turn rate is the one thing the chase keeps for itself.
+  // How Spot runs between cuts, before the tempo scales it. The chase keeps
+  // the turn rate and the speed for itself; this is everything else.
   const CRUISE = {
     gait: 'trot', speed: 1.45, strafe: 0, turn: 0, height: 0.50, stepHeight: 0.12,
     cadence: 1.05, lean: 0.03, bank: 0, tau: 0.3, arm: 'auto', armAmp: 1,
     label: 'running',
   };
-  const cruise = Object.assign({}, CRUISE);
+  const cruise = CRUISE;
 
   const CHASE = {
     speed: 1.9,       // Echo's flat out, which is quicker than Spot cruises
@@ -832,6 +828,53 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const chase = { phase: 'close', t: 0, cool: 0, closest: Infinity };
   let broken = 0;
+
+  // The chase doesn't run at one speed. It drops into a lope where Echo sits
+  // off Spot's shoulder and neither commits, winds back up, and now and then
+  // breaks into a flat sprint with the feet leaving the ground. Everything
+  // typed sets the base that this scales, so "sneak" still sneaks — it just
+  // sneaks in waves. `tau` is how long each wind-up takes: dropping back into
+  // a lope should sag, opening it up should snap.
+  const TEMPO = {
+    lope: { scale: 0.42, standoff: 2.7, tau: 1.7, span: [4, 7.5] },
+    press: { scale: 1, standoff: 1.7, tau: 1.1, span: [5, 9] },
+    burst: { scale: 1.6, standoff: 1.45, tau: 0.45, span: [3, 5] },
+  };
+  const AFTER = { lope: 'press', press: 'burst', burst: 'lope' };
+  const tempo = { phase: 'press', t: 0, span: 7, scale: 1, standoff: 1.7, want: 1, hold: 0 };
+
+  function setTempo(phase) {
+    // While the knob is being driven, the scene doesn't get a vote.
+    if (tempo.hold > 0) return;
+    tempo.phase = phase;
+    tempo.t = 0;
+    const span = TEMPO[phase].span;
+    tempo.span = span[0] + Math.random() * (span[1] - span[0]);
+    // Opening it up is where a leap belongs; nothing jumps at a lope.
+    if (phase === 'burst' && Math.random() < 0.55 && !move && !queued.length && !pending) {
+      queued.push(hurdleMove());
+    }
+  }
+
+  function tickTempo(dt) {
+    if (tempo.hold > 0) {
+      tempo.hold -= dt;
+      // A knob has to answer straight away or it feels broken.
+      tempo.scale += (tempo.want - tempo.scale) * (1 - Math.exp(-dt / 0.3));
+      // Whoever is driving, the gear is the gear: name it from the speed so
+      // the readout and the automatic phases agree.
+      tempo.phase = tempo.scale > 1.3 ? 'burst' : tempo.scale < 0.62 ? 'lope' : 'press';
+      tempo.t = 0;
+    } else {
+      tempo.t += dt;
+      if (tempo.t > tempo.span) setTempo(AFTER[tempo.phase]);
+      const want = TEMPO[tempo.phase];
+      tempo.scale += (want.scale - tempo.scale) * (1 - Math.exp(-dt / want.tau));
+    }
+    // Echo works closer the harder the chase is being run.
+    const gear = clamp((tempo.scale - 0.42) / 1.18, 0, 1);
+    tempo.standoff += (2.7 - 1.25 * gear - tempo.standoff) * (1 - Math.exp(-dt / 0.8));
+  }
 
   // --- what Spot does about it ----------------------------------------------
 
@@ -906,6 +949,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (d < 2.6) {
         timeScale = 0.45;
         shake = 1;
+        if (audio) audio.hit('cut');
       }
     }
   }
@@ -930,6 +974,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Cruising: hold the commanded run, and bend it back toward the middle so
   // the chase keeps happening in front of the camera instead of off in the fog.
+  function runSpeed() {
+    return cruise.speed * tempo.scale;
+  }
+
   function tickCruise() {
     const s = spotGait.state;
     const dx = HOME[0] - s.pos[0];
@@ -938,11 +986,20 @@ document.addEventListener('DOMContentLoaded', () => {
     const pull = smoothstep(clamp((dist - 1.8) / 2.4, 0, 1));
     const wander = 0.34 * Math.sin(clock * 0.37) * (1 - pull);
     const inward = bearingFrom(spotGait, dx, dz);
-    const turn = cruise.speed > 0.15 ? clamp(wander + 1.4 * pull * inward, -1.1, 1.1) : 0;
-    spotGait.setCommand(Object.assign({}, cruise, { turn }));
+    const speed = runSpeed();
+    const turn = speed > 0.15 ? clamp(wander + 1.4 * pull * inward, -1.1, 1.1) : 0;
+    // A gait is just what a speed looks like, so there is nothing else to
+    // decide: a sprint bounds, a lope walks.
+    const gait = speed > 1.5 ? 'bound' : speed > 0.45 ? 'trot' : speed > 0.05 ? 'walk' : 'stand';
+    spotGait.setCommand(Object.assign({}, cruise, {
+      turn, speed, gait,
+      // Feet leave the ground harder the faster it is going.
+      stepHeight: cruise.stepHeight * (0.85 + 0.55 * tempo.scale),
+    }));
   }
 
   function tickSpot(dt) {
+    tickTempo(dt);
     if (pending) {
       pending.t -= dt;
       if (pending.t <= 0) {
@@ -974,6 +1031,8 @@ document.addEventListener('DOMContentLoaded', () => {
       chase.cool = CHASE.cooldown;
       if (chase.closest > CHASE.beaten) {
         broken += 1;
+        setTempo('burst');
+        if (audio) audio.hit('broken');
         flash(`${broken === 1 ? 'Broken tackle' : `${broken} broken tackles`} · Echo went past`, 2);
       } else {
         flash('Echo gets a hand on him \u2014 Spot stays up', 1.6);
@@ -1006,17 +1065,18 @@ document.addEventListener('DOMContentLoaded', () => {
     // since a pure tail chase never actually catches up to anything. Inside
     // the standoff it just paces him — everything closer has to be dived for.
     const pace = Math.abs(spotGait.state.speed);
-    const want = Math.max(0, Math.min(CHASE.speed, pace + 0.75 * (dist - CHASE.standoff)))
+    const flatOut = CHASE.speed * (0.7 + 0.3 * tempo.scale);
+    const want = Math.max(0, Math.min(flatOut, pace + 0.75 * (dist - tempo.standoff)))
       * (1 - 0.75 * smoothstep(clamp((Math.abs(aim) - 0.45) / 1.0, 0, 1)));
     echoGait.setCommand({
       gait: want > 1.05 ? 'bound' : want > 0.35 ? 'trot' : 'walk',
       speed: want, strafe: 0, turn: clamp(2.4 * aim, -2.2, 2.2),
-      height: 0.48, stepHeight: 0.12, cadence: 1.1, lean: 0.05, bank: 0, tau: 0.24,
+      height: 0.48, stepHeight: 0.1 + 0.05 * tempo.scale, cadence: 1.1, lean: 0.05, bank: 0, tau: 0.24,
       arm: 'auto', label: 'chasing',
     });
 
     // Committed, and it cannot steer out of it — which is what a cut is for.
-    if (chase.cool <= 0 && dist < CHASE.lungeAt && Math.abs(aim) < 0.8 && cruise.speed > 0.4) {
+    if (chase.cool <= 0 && dist < CHASE.lungeAt && Math.abs(aim) < 0.8 && runSpeed() > 0.4) {
       chase.phase = 'lunge';
       chase.t = 0;
       chase.closest = dist;
@@ -1027,6 +1087,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // camera operator keeps the shot rather than joining in.
         arm: pov ? 'auto' : 'reach', label: 'diving',
       });
+      if (audio) audio.hit('dive');
       // Spot sees it coming. A typed move already in flight has the right of
       // way — the visitor's cut beats the automatic one.
       if (!move && !queued.length && !pending) {
@@ -1050,13 +1111,10 @@ document.addEventListener('DOMContentLoaded', () => {
       dz - Math.sin(s.yaw) * s.speed * lead);
 
     tickSpot(dt);
-    if (echoHold > 0) {
-      echoHold -= dt;
-      echoGait.setCommand({ gait: 'stand', speed: 0, strafe: 0, turn: 0, bank: 0, tau: 0.3, label: 'holding' });
-    } else {
-      tickEcho(dt, dist, aim);
-    }
+    tickEcho(dt, dist, aim);
     updateStatus(dt, dist);
+    if (knobShow) knobShow(paceToKnob(tempo.scale));
+    if (audio) audio.update(dt, { intensity: audioIntensity(dist), rate: timeScale });
   }
 
   // Whatever the chase does, the two bodies never overlap: Echo is stopped at
@@ -1108,158 +1166,139 @@ document.addEventListener('DOMContentLoaded', () => {
     statusAt -= dt;
     if (statusAt > 0) return;
     statusAt = 0.25;
+    const gear = tempo.phase === 'burst' ? 'flat out'
+      : tempo.phase === 'lope' ? 'loping'
+      : 'running';
     const doing = move ? move.name
-      : cruise.speed < 0.15 ? 'standing'
-      : `${cruise.label} at ${spotGait.state.speed.toFixed(1)} m/s`;
+      : runSpeed() < 0.15 ? 'standing'
+      : `${gear} at ${spotGait.state.speed.toFixed(1)} m/s`;
     const gap = `Echo ${dist.toFixed(1)} m`;
     const tail = chase.phase === 'lunge' ? 'diving'
       : chase.phase === 'whiff' ? 'turning around'
-      : echoHold > 0 ? 'holding off'
       : dist < 2.6 ? 'closing' : 'chasing';
     setStatus(`Spot ${doing} · ${gap} ${tail}${broken ? ` · ${broken} broken` : ''}`);
   }
 
-  // --- text -> the carrier ---------------------------------------------------
+  // --- the deck --------------------------------------------------------------
 
-  // Parsing lives in the gait solver, so a phrase typed before the model has
-  // landed waits here and runs the moment the solver exists.
-  let pendingText = '';
-  // Seconds Echo stands off for, when it has been told to.
-  let echoHold = 0;
+  // The whole interface is one knob and three pads. The knob is the gear the
+  // chase runs in: hold it and you drive, let go and the chase takes itself
+  // back a few seconds later. It reads the tempo out the rest of the time, so
+  // it turns itself while the scene winds up and down.
+  const PACE = { lo: 0.35, hi: 1.85, grab: 8, sens: 150 };
 
-  // One phrase can be several moves: "juke left, then spin".
-  const SPLIT = /\s*(?:[,;]|\band then\b|\bthen\b|\bafter that\b|그리고|그 ?다음에?|다음에)\s*/i;
-  const JUKE = /\b(juke|jou?ke|cut|jink|sidestep|side-?step|shake|fake|dodge)\b|저크|페이크|제치|제껴|꺾|틀어/i;
-  const SPIN = /\b(spin|whirl|twirl|pirouette|reverse)\b|스핀|회전|돌아|돌려/i;
-  const HURDLE = /\b(hurdle|vault|jump over|leap over|뛰어넘|넘어|허들|점프)\b/i;
-  const LEFT = /\b(left|port)\b|왼|좌측/i;
-  const RIGHT = /\b(right|starboard)\b|오른|우측/i;
-  const ECHO_WHO = /\becho\b|에코/i;
-  const ECHO_OFF = /\b(back off|stand off|hold|wait|stay|ease up|give (him|spot) room)\b|물러|기다|비켜|떨어져/i;
-  const ECHO_ON = /\b(chase|go|get (him|spot)|after him|press)\b|잡아|쫓|가|붙어/i;
-  const LOOK = /\bwhat (do|can|did) (you|they|we) see\b|\bwhat'?s (there|around|out there|in front)\b|\bdescribe\b|\blook around\b|뭐가 ?보|뭐 ?보여|무엇이 ?보|보이는 ?(게|것)|주변 ?(을 ?)?설명/i;
-
-  // Which way a cut goes when the phrase doesn't say: away from Echo.
-  function sideFrom(text) {
-    if (LEFT.test(text)) return 1;
-    if (RIGHT.test(text)) return -1;
-    return cutSide();
+  function paceToKnob(scale) {
+    return clamp((scale - PACE.lo) / (PACE.hi - PACE.lo), 0, 1);
   }
 
-  // A clause is either a move to run, a change to the cruise, or a word to
-  // Echo. ctx carries who is being spoken to from one clause to the next, so
-  // "echo, back off" survives being split on its own comma. Returns false for
-  // anything it couldn't make sense of.
-  function readClause(clause, ctx) {
-    const text = ` ${clause} `;
-
-    if (LOOK.test(text)) {
-      flash(describeView(), 3);
-      return true;
-    }
-
-    const named = ECHO_WHO.test(text);
-    if (named) ctx.who = 'echo';
-    if (ctx.who === 'echo') {
-      if (ECHO_OFF.test(text)) {
-        echoHold = 4;
-        chase.phase = 'close';
-        chase.t = 0;
-        ctx.who = 'spot';
-        flash('Echo backs off — Spot has the field', 2);
-        return true;
-      }
-      if (ECHO_ON.test(text)) {
-        echoHold = 0;
-        chase.cool = 0;
-        ctx.who = 'spot';
-        flash('Echo is on him', 1.5);
-        return true;
-      }
-      // A bare name is an address: whatever follows the comma is for Echo.
-      if (named && !text.replace(ECHO_WHO, ' ').replace(/[^\p{L}\p{N}]/gu, '')) return true;
-      // Anything else said to Echo: it has one job and it is already doing it.
-      ctx.who = 'spot';
-      flash('Echo only chases — the moves are Spot’s', 2);
-      return true;
-    }
-
-    // A called move is acknowledged as it is queued, so the line under the box
-    // answers the visitor rather than whatever the chase was saying.
-    const call = (m) => {
-      pending = null;
-      queued.push(m);
-      flash(`Spot ${m.call}`, 1.2);
-      return true;
-    };
-    if (SPIN.test(text)) return call(spinMove(sideFrom(text)));
-    if (HURDLE.test(text)) return call(hurdleMove());
-    if (JUKE.test(text)) return call(jukeMove(sideFrom(text)));
-
-    // Anything else is a change to how Spot runs between cuts.
-    const cmd = spotGait.parse(clause);
-    if (!cmd) return false;
-    // The chase owns where Spot points; a phrase only says how it moves.
-    delete cmd.turn;
-    delete cmd.strafe;
-    Object.assign(cruise, cmd);
-    if (cmd.gait === 'stand') cruise.speed = 0;
-    flash(`Spot ${spotGait.describe(Object.assign({}, cruise))}`, 1.6);
-    return true;
+  function setPace(v) {
+    tempo.want = PACE.lo + clamp(v, 0, 1) * (PACE.hi - PACE.lo);
+    tempo.hold = PACE.grab;
   }
 
-  function applyText(text) {
-    let any = false;
-    const ctx = { who: 'spot' };
-    text.split(SPLIT).map((c) => c.trim()).filter(Boolean).forEach((clause) => {
-      if (readClause(clause, ctx)) any = true;
+  function setupDeck() {
+    const knob = document.getElementById('cloud-pace');
+    const dial = knob && knob.querySelector('i');
+
+    document.querySelectorAll('[data-move]').forEach((pad) => {
+      pad.addEventListener('click', () => {
+        if (!spotGait) return;
+        const kind = pad.dataset.move;
+        const m = kind === 'spin' ? spinMove(cutSide())
+          : kind === 'hurdle' ? hurdleMove()
+          : jukeMove(cutSide());
+        pending = null;
+        queued.push(m);
+        flash(`Spot ${m.call}`, 1.2);
+        pad.classList.add('lit');
+        setTimeout(() => pad.classList.remove('lit'), 140);
+      });
     });
-    if (!any) {
-      setStatus('Not sure what that means — try "juke left", "spin", "sprint", or "echo, back off".', true);
-    }
-  }
 
-  function setupPrompt() {
-    if (!formEl || !inputEl) return;
-    formEl.addEventListener('submit', (evt) => {
+    if (!knob) return;
+    let held = null;
+
+    const show = (v) => {
+      if (dial) dial.style.transform = `rotate(${-140 + v * 280}deg)`;
+      knob.setAttribute('aria-valuenow', Math.round(v * 100));
+    };
+    knobShow = show;
+    show(paceToKnob(tempo.scale));
+
+    knob.addEventListener('pointerdown', (evt) => {
       evt.preventDefault();
-      const text = inputEl.value.trim();
-      if (!text) return;
-      if (!spotGait) {
-        pendingText = text;
-        setStatus('Waiting for the robots to load…');
-        return;
-      }
-      applyText(text);
+      knob.setPointerCapture(evt.pointerId);
+      held = { y: evt.clientY, v: paceToKnob(tempo.scale) };
+      knob.focus();
+    });
+    knob.addEventListener('pointermove', (evt) => {
+      if (!held) return;
+      // Up is faster, which is the way every knob like this has ever worked.
+      held.v = clamp(held.v + (held.y - evt.clientY) / PACE.sens, 0, 1);
+      held.y = evt.clientY;
+      setPace(held.v);
+      show(held.v);
+    });
+    const release = (evt) => {
+      if (!held) return;
+      held = null;
+      if (knob.hasPointerCapture(evt.pointerId)) knob.releasePointerCapture(evt.pointerId);
+    };
+    knob.addEventListener('pointerup', release);
+    knob.addEventListener('pointercancel', release);
+
+    knob.addEventListener('keydown', (evt) => {
+      const step = evt.key === 'ArrowUp' || evt.key === 'ArrowRight' ? 0.08
+        : evt.key === 'ArrowDown' || evt.key === 'ArrowLeft' ? -0.08
+        : evt.key === 'Home' ? -1 : evt.key === 'End' ? 1 : 0;
+      if (!step) return;
+      evt.preventDefault();
+      const v = clamp(paceToKnob(tempo.scale) + step, 0, 1);
+      setPace(v);
+      show(v);
     });
   }
 
-  // --- what the camera sees --------------------------------------------------
+  // Set once the knob exists; the frame loop turns it while the chase drives.
+  let knobShow = null;
 
-  // Answered from where things are, not from pixels: both robots are projected
-  // into the current camera and read off left to right.
-  function describeView() {
-    const fwd = forwardVector();
-    const right = [Math.cos(camera.yaw), 0, -Math.sin(camera.yaw)];
-    const halfWidth = 0.5 * canvas.width / canvas.height;
-    const seen = [];
-    const consider = (name, x, y, z) => {
-      const v = [x - camera.pos[0], y - camera.pos[1], z - camera.pos[2]];
-      const depth = v[0] * fwd[0] + v[1] * fwd[1] + v[2] * fwd[2];
-      if (depth < 0.3) return;
-      const across = (v[0] * right[0] + v[2] * right[2]) / depth;
-      const dist = Math.hypot(v[0], v[2]);
-      if (Math.abs(across) > halfWidth * 1.05 || dist > 12) return;
-      const side = across < -halfWidth / 3 ? 'on the left' : across > halfWidth / 3 ? 'on the right' : 'ahead';
-      seen.push(`${name} ${dist.toFixed(1)} m ${side}`);
-    };
-    consider('Spot', spotGait.pose.pos[0], 0.5, spotGait.pose.pos[2]);
-    if (!pov) consider('Echo', echoGait.pose.pos[0], 0.5, echoGait.pose.pos[2]);
-    const gap = Math.hypot(spotGait.state.pos[0] - echoGait.state.pos[0],
-      spotGait.state.pos[2] - echoGait.state.pos[2]);
-    seen.push(`${gap.toFixed(1)} m between them`);
-    const from = pov ? 'Echo cam' : 'From here';
-    return `${from}: ${seen.join(' · ')}`;
+  // --- sound -----------------------------------------------------------------
+
+  // Nothing plays until somebody asks for it: browsers block audio without a
+  // gesture, and a page that makes noise on its own deserves to be closed.
+  let audio = null;
+  let soundOn = false;
+
+  function setSound(on) {
+    const btn = document.getElementById('cloud-sound');
+    if (on && !audio && window.createChaseAudio) {
+      try {
+        audio = window.createChaseAudio();
+      } catch (err) {
+        console.warn(err);
+      }
+    }
+    if (on && !audio) return;
+    soundOn = on;
+    if (audio) {
+      if (on) audio.start();
+      else audio.stop();
+    }
+    if (btn) btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  }
+
+  function setupSound() {
+    const btn = document.getElementById('cloud-sound');
+    if (!btn) return;
+    btn.addEventListener('click', () => setSound(!soundOn));
+  }
+
+  // How hard the music should be working: the gear the chase is in, leaned on
+  // when Echo is close enough to do something about it.
+  function audioIntensity(dist) {
+    const gear = clamp((tempo.scale - PACE.lo) / (PACE.hi - PACE.lo), 0, 1);
+    const near = 1 - smoothstep(clamp((dist - 1.4) / 2.2, 0, 1));
+    return clamp(0.65 * gear + 0.35 * near, 0, 1);
   }
 
   let wired = false;
@@ -1271,7 +1310,8 @@ document.addEventListener('DOMContentLoaded', () => {
     if (wired) return;
     wired = true;
     setupControls();
-    setupPrompt();
+    setupDeck();
+    setupSound();
     setupPov();
     window.addEventListener('resize', resize);
     new IntersectionObserver((entries) => {
