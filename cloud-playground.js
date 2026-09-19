@@ -17,7 +17,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const params = {
     color: [1, 1, 1],
-    density: 0.54,
+    density: 0.68,
     puffiness: 0.68,
     turbulence: 0.3,
     height: 0.2,
@@ -35,6 +35,9 @@ document.addEventListener('DOMContentLoaded', () => {
     SPOT_POS[2] - 0.2 * Math.sin(SPOT_YAW) - 1.8 * Math.cos(SPOT_YAW),
   ];
   const ECHO_PAINT = [0.3, 0.32, 0.35];
+  // Seconds Echo's arm clock runs ahead of Spot's; anything that isn't a
+  // neat fraction of the idle loop will do.
+  const ECHO_CLOCK = 4.3;
 
   // Starts a few meters back from Spot, roughly at eye level and tilted
   // slightly down toward it; from there trackPair() covers the chase.
@@ -135,7 +138,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // The pair runs inside a pocket of thinner air, so the chase stays legible
     // from far enough back to see a cut instead of a robot filling the frame.
     float clearingAround(vec3 p, vec3 robot) {
-      return mix(0.28, 1.0, smoothstep(1.2, 4.2, length(p - vec3(robot.x, 0.6, robot.y))));
+      return mix(0.2, 1.0, smoothstep(1.2, 4.6, length(p - vec3(robot.x, 0.6, robot.y))));
     }
 
     float cloudDensity(vec3 p) {
@@ -518,9 +521,12 @@ document.addEventListener('DOMContentLoaded', () => {
     if (spotGait) tickChase(sim);
 
     let spotDrawn = false;
-    // Spot first: Echo reads off where Spot is this frame.
+    // Spot first: Echo reads off where Spot is this frame. Echo is handed a
+    // clock of its own, a few seconds out of step, because the idle arm loop
+    // runs off that time directly: on the same clock the two robots wave in
+    // perfect sync, which reads as choreography rather than two machines.
     const pose = spotGait ? spotGait.update(sim, clock) : null;
-    const echoPose = echoGait ? echoGait.update(sim, clock) : null;
+    const echoPose = echoGait ? echoGait.update(sim, clock + ECHO_CLOCK) : null;
     if (echoPose) keepApart();
     trackPair(dt);
     if (pov && echoPose) rideHandCamera(echoPose);
@@ -835,10 +841,11 @@ document.addEventListener('DOMContentLoaded', () => {
   function jukeMove(side) {
     return { name: side > 0 ? 'cutting left' : 'cutting right', call: side > 0 ? 'cuts left' : 'cuts right', cut: 1, steps: [
       { t: 0.20, cmd: { gait: 'trot', speed: 0.8, strafe: -0.2 * side, turn: -0.4 * side,
-        bank: -0.20 * side, height: 0.41, stepHeight: 0.07, cadence: 1.3, tau: 0.10, label: 'planting' } },
+        bank: -0.20 * side, height: 0.41, stepHeight: 0.07, cadence: 1.3, tau: 0.10,
+        arm: 'stow', label: 'planting' } },
       { t: 0.45, cmd: { gait: 'bound', speed: 0.95, strafe: 1.3 * side, turn: 1.6 * side,
         bank: 0.36 * side, height: 0.44, stepHeight: 0.16, cadence: 1.35, tau: 0.09,
-        arm: 'reach', label: 'cutting' } },
+        arm: 'stow', label: 'cutting' } },
       { t: 0.8, cmd: { gait: 'bound', speed: 2.1, strafe: 0, turn: 0.3 * side, bank: 0.1 * side,
         height: 0.50, stepHeight: 0.15, cadence: 1.25, tau: 0.18, arm: 'auto', label: 'breaking away' } },
     ] };
@@ -850,7 +857,7 @@ document.addEventListener('DOMContentLoaded', () => {
       { t: 0.18, cmd: { gait: 'trot', speed: 0.55, height: 0.42, cadence: 1.2, bank: -0.14 * side,
         tau: 0.10, label: 'planting' } },
       { t: 0.7, cmd: { gait: 'trot', speed: 0.45, turn: 2.7 * side, bank: 0.3 * side, height: 0.44,
-        stepHeight: 0.13, cadence: 1.45, tau: 0.10, arm: 'reach', label: 'spinning' } },
+        stepHeight: 0.13, cadence: 1.45, tau: 0.10, arm: 'stow', label: 'spinning' } },
       { t: 0.5, cmd: { gait: 'bound', speed: 1.85, turn: 0.2 * side, bank: 0.08 * side, height: 0.50,
         stepHeight: 0.15, cadence: 1.2, tau: 0.2, arm: 'auto', label: 'breaking away' } },
     ] };
@@ -860,7 +867,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function hurdleMove() {
     return { name: 'hurdling', call: 'goes over the top', cut: 1, steps: [
       { t: 0.16, cmd: { gait: 'trot', speed: 0.9, height: 0.40, stepHeight: 0.07, cadence: 1.3,
-        lean: -0.05, tau: 0.09, label: 'gathering' } },
+        lean: -0.05, tau: 0.09, arm: 'stow', label: 'gathering' } },
       { t: 0.5, cmd: { gait: 'bound', speed: 1.7, height: 0.57, stepHeight: 0.2, cadence: 0.8,
         lean: 0.1, tau: 0.09, label: 'hurdling' } },
       { t: 0.45, cmd: { gait: 'bound', speed: 1.9, height: 0.50, stepHeight: 0.15, cadence: 1.2,
@@ -868,9 +875,14 @@ document.addEventListener('DOMContentLoaded', () => {
     ] };
   }
 
-  // The move being run right now, and anything typed to follow it.
+  // The move being run right now, anything typed to follow it, and a move
+  // waiting out Spot's reaction time. Without that last one Spot and Echo
+  // move on the very same frame, which reads as choreography rather than as
+  // one robot answering the other.
+  const REACTION = 0.13;
   let move = null;
   let queued = [];
+  let pending = null;
 
   function startMove(m) {
     move = { steps: m.steps, name: m.name, call: m.call, cut: !!m.cut, i: -1, t: 0 };
@@ -931,6 +943,13 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function tickSpot(dt) {
+    if (pending) {
+      pending.t -= dt;
+      if (pending.t <= 0) {
+        startMove(pending.m);
+        pending = null;
+      }
+    }
     if (!move && queued.length) startMove(queued.shift());
     if (!move) {
       tickCruise();
@@ -1010,9 +1029,9 @@ document.addEventListener('DOMContentLoaded', () => {
       });
       // Spot sees it coming. A typed move already in flight has the right of
       // way — the visitor's cut beats the automatic one.
-      if (!move && !queued.length) {
+      if (!move && !queued.length && !pending) {
         const m = jukeMove(cutSide());
-        startMove(m);
+        pending = { m, t: REACTION };
         flash(`Echo dives — Spot ${m.call}`, 1.4);
       }
     }
@@ -1168,6 +1187,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // A called move is acknowledged as it is queued, so the line under the box
     // answers the visitor rather than whatever the chase was saying.
     const call = (m) => {
+      pending = null;
       queued.push(m);
       flash(`Spot ${m.call}`, 1.2);
       return true;
