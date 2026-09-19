@@ -7,8 +7,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const inputEl = document.getElementById('cloud-input');
   const povEl = document.getElementById('cloud-pov');
   const povTagEl = document.getElementById('cloud-povtag');
-  const siteEl = document.getElementById('cloud-site');
-  const Site = window.FieldSite;
 
   // Visitors used to paste their own Gemini key; drop any copy left behind.
   try {
@@ -19,7 +17,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const params = {
     color: [1, 1, 1],
-    density: 0.6,
+    density: 0.54,
     puffiness: 0.68,
     turbulence: 0.3,
     height: 0.2,
@@ -30,26 +28,20 @@ document.addEventListener('DOMContentLoaded', () => {
   const SPOT_POS = [0.1, 0, 2.35];
   const SPOT_YAW = 2.5;
   const SPOT_MAX_DIST = 20;
-  // Echo, the second robot, starts in its place beside Spot (STANDOFF below)
-  // facing the same way, in graphite so the two can be told apart at a glance.
+  // Echo, the second robot, starts off Spot's shoulder facing the same way,
+  // in graphite so the two can be told apart at a glance.
   const ECHO_POS = [
     SPOT_POS[0] + 0.2 * Math.cos(SPOT_YAW) - 1.8 * Math.sin(SPOT_YAW), 0,
     SPOT_POS[2] - 0.2 * Math.sin(SPOT_YAW) - 1.8 * Math.cos(SPOT_YAW),
   ];
   const ECHO_PAINT = [0.3, 0.32, 0.35];
-  const MAX_PROPS = Site ? Site.MAX_PROPS : 16;
-
-  // A Worker (worker/ in the repo) that asks Gemini to lay out a place it has
-  // never heard of. Left empty, only the built-in places exist and nothing
-  // leaves the browser.
-  const CLOUD_ENDPOINT = '';
 
   // Starts a few meters back from Spot, roughly at eye level and tilted
-  // slightly down toward it.
+  // slightly down toward it; from there trackPair() covers the chase.
   const camera = {
-    pos: [0, 1.15, 0],
+    pos: [0, 1.55, -2.9],
     yaw: 0,
-    pitch: -0.14,
+    pitch: -0.17,
   };
   const MIN_CAMERA_Y = 0.15;
   // Riding the gripper camera: the free camera is parked here until you come back.
@@ -61,6 +53,12 @@ document.addEventListener('DOMContentLoaded', () => {
   let dragging = false;
   let lastPointerX = 0;
   let lastPointerY = 0;
+  // Scene time, which a cut briefly runs slower than the wall clock.
+  let clock = 0;
+  let timeScale = 1;
+  let shake = 0;
+  let touchedAt = -Infinity;
+  const reducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   function setStatus(msg, isError) {
     if (!statusEl) return;
@@ -134,20 +132,10 @@ document.addEventListener('DOMContentLoaded', () => {
     uniform vec3 uSpotB;
     const float SPOT_MAX_DIST = ${SPOT_MAX_DIST.toFixed(1)};
 
-    // The fog curtain: 0 is the normal scene, 1 has everything but the robots
-    // gone behind haze, which is what a change of place happens under.
-    uniform float uVeil;
-
-    // Props, packed by field-site.js into a ${MAX_PROPS}x2 texture: row 0 is x, z
-    // (5 cm steps around SITE_CENTER) and half extents, row 1 height, kind
-    // and shape. A texture rather than uniforms because WebGL only promises
-    // sixteen uniform slots to a fragment shader.
-    uniform sampler2D uProps;
-    uniform float uPropCount;
-    const vec2 SITE_CENTER = vec2(${SPOT_POS[0].toFixed(3)}, ${SPOT_POS[2].toFixed(3)});
-
+    // The pair runs inside a pocket of thinner air, so the chase stays legible
+    // from far enough back to see a cut instead of a robot filling the frame.
     float clearingAround(vec3 p, vec3 robot) {
-      return mix(0.35, 1.0, smoothstep(0.9, 2.6, length(p - vec3(robot.x, 0.6, robot.y))));
+      return mix(0.28, 1.0, smoothstep(1.2, 4.2, length(p - vec3(robot.x, 0.6, robot.y))));
     }
 
     float cloudDensity(vec3 p) {
@@ -165,11 +153,9 @@ document.addEventListener('DOMContentLoaded', () => {
       base -= 0.15 * (1.0 - fbm(q * 4.0 + 7.3));
       float bandCenter = mix(0.6, 2.4, uHeight);
       float band = 1.0 - smoothstep(0.8, 1.8, abs(p.y - bandCenter));
-      // Thin the fog right around each robot so even the densest phrase
-      // leaves it as a silhouette rather than swallowing it whole. The
-      // curtain lets most of it back in.
+      // Thin the fog right around each robot so it stays a silhouette in the
+      // murk rather than being swallowed whole.
       float clearing = min(clearingAround(p, uSpotA), clearingAround(p, uSpotB));
-      clearing = mix(clearing, 1.0, uVeil * 0.6);
       return clamp(base, 0.0, 1.0) * band * clearing;
     }
 
@@ -231,68 +217,6 @@ document.addEventListener('DOMContentLoaded', () => {
       return shade;
     }
 
-    // Axis-aligned box standing on the ground. Returns the hit distance, or
-    // -1, and the face normal. Starting inside one counts as a miss.
-    float boxHit(vec3 ro, vec3 rd, vec2 c, vec2 ext, float h, out vec3 n) {
-      vec3 lo = vec3(c.x - ext.x, 0.0, c.y - ext.y);
-      vec3 hi = vec3(c.x + ext.x, h, c.y + ext.y);
-      vec3 inv = 1.0 / (rd + vec3(equal(rd, vec3(0.0))) * 1e-5);
-      vec3 t0 = (lo - ro) * inv;
-      vec3 t1 = (hi - ro) * inv;
-      vec3 tn = min(t0, t1);
-      vec3 tf = max(t0, t1);
-      float tNear = max(max(tn.x, tn.y), tn.z);
-      float tFar = min(min(tf.x, tf.y), tf.z);
-      n = vec3(0.0, 1.0, 0.0);
-      if (tFar < tNear || tNear <= 0.0) return -1.0;
-      if (tNear == tn.x) n = vec3(-sign(rd.x), 0.0, 0.0);
-      else if (tNear == tn.z) n = vec3(0.0, 0.0, -sign(rd.z));
-      return tNear;
-    }
-
-    // Upright cylinder of radius r standing on the ground: side, then lid.
-    float cylHit(vec3 ro, vec3 rd, vec2 c, float r, float h, out vec3 n) {
-      vec2 oc = ro.xz - c;
-      float t = 1e4;
-      n = vec3(0.0, 1.0, 0.0);
-      float a = dot(rd.xz, rd.xz);
-      if (a > 1e-6) {
-        float b = dot(oc, rd.xz);
-        float disc = b * b - a * (dot(oc, oc) - r * r);
-        if (disc >= 0.0) {
-          float ts = (-b - sqrt(disc)) / a;
-          float y = ro.y + rd.y * ts;
-          if (ts > 0.0 && y >= 0.0 && y <= h) {
-            t = ts;
-            n = vec3((oc.x + rd.x * ts) / r, 0.0, (oc.y + rd.z * ts) / r);
-          }
-        }
-      }
-      if (abs(rd.y) > 1e-6) {
-        float tc = (h - ro.y) / rd.y;
-        vec2 q = oc + rd.xz * tc;
-        if (tc > 0.0 && tc < t && dot(q, q) <= r * r) {
-          t = tc;
-          n = vec3(0.0, 1.0, 0.0);
-        }
-      }
-      return t < 1e4 ? t : -1.0;
-    }
-
-    // Kind ids match field-site.js.
-    vec3 propColor(float kind, vec3 p) {
-      if (kind < 1.5) return vec3(0.5, 0.36, 0.21) * (fract(p.y * 6.0) < 0.1 ? 0.7 : 1.0);
-      if (kind < 2.5) return vec3(0.17, 0.3, 0.47) * (abs(fract(p.y * 3.4) - 0.5) < 0.04 ? 0.7 : 1.0);
-      if (kind < 3.5) return vec3(0.16, 0.17, 0.18);
-      if (kind < 4.5) return vec3(0.45, 0.45, 0.43);
-      if (kind < 5.5) return vec3(0.58, 0.46, 0.29);
-      if (kind < 6.5) return p.y > 0.24 && p.y < 0.34 ? vec3(0.92, 0.92, 0.88) : vec3(0.95, 0.4, 0.09);
-      if (kind < 7.5) return fract(p.y * 1.7) < 0.07 ? vec3(0.9, 0.55, 0.12) : vec3(0.2, 0.32, 0.52);
-      if (kind < 8.5) return vec3(0.24, 0.18, 0.13);
-      if (kind < 9.5) return vec3(0.37, 0.35, 0.32);
-      return vec3(0.55, 0.54, 0.5);
-    }
-
     void main() {
       vec2 uv = (gl_FragCoord.xy - 0.5 * uResolution) / uResolution.y;
 
@@ -331,41 +255,6 @@ document.addEventListener('DOMContentLoaded', () => {
         onGround = true;
       }
 
-      // Props: the nearest one in front of the ground wins, and the ground
-      // picks up a contact shadow and a short cast shadow from each.
-      float propShade = 1.0;
-      for (int i = 0; i < ${MAX_PROPS}; i++) {
-        if (float(i) >= uPropCount) break;
-        float u = (float(i) + 0.5) / ${MAX_PROPS.toFixed(1)};
-        vec4 pa = texture2D(uProps, vec2(u, 0.25));
-        vec4 pb = texture2D(uProps, vec2(u, 0.75));
-        vec2 c = SITE_CENTER + (pa.rg * 255.0 - 128.0) * 0.05;
-        vec2 ext = pa.ba * 2.55;
-        float h = pb.r * 2.55;
-        bool isRound = pb.b > 0.5;
-        vec3 n;
-        float t = isRound ? cylHit(ro, rd, c, ext.x, h, n) : boxHit(ro, rd, c, ext, h, n);
-        if (t > 0.0 && t < tHit) {
-          vec3 p = ro + rd * t;
-          vec3 albedo = propColor(floor(pb.g * 255.0 + 0.5), p);
-          float diff = max(dot(n, SUN_DIR), 0.0);
-          surf = albedo * (0.42 * (0.5 + 0.5 * n.y) + 0.72 * diff);
-          // Darker toward the base, where the ground crowds out the sky.
-          surf *= mix(0.62, 1.0, smoothstep(0.0, 0.3, p.y));
-          tHit = t;
-          onGround = false;
-        }
-        if (onGround) {
-          vec2 q = gp.xz - c;
-          vec2 qs = q + SUN_DIR.xz / SUN_DIR.y * h * 0.5;
-          float contact = isRound ? length(q) - ext.x : length(max(abs(q) - ext, 0.0));
-          float castDist = isRound ? length(qs) - ext.x : length(max(abs(qs) - ext, 0.0));
-          propShade *= 1.0 - 0.35 * (1.0 - smoothstep(0.0, 0.25, contact));
-          propShade *= 1.0 - 0.25 * (1.0 - smoothstep(0.0, 0.7, castDist));
-        }
-      }
-      if (onGround) surf *= propShade;
-
       bool onRobot = false;
       vec4 spot = texture2D(uSpotTex, gl_FragCoord.xy / uResolution);
       if (uSpotLoaded > 0.5 && spot.a > 0.0) {
@@ -378,17 +267,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
       }
 
-      if (tHit < 1e4) {
-        // The curtain is a much thicker haze on everything but the robots,
-        // so they keep walking in plain sight while the place goes white.
-        float extinction = 0.09 + uVeil * (onRobot ? 0.08 : 1.6);
-        col = mix(haze, surf, exp(-tHit * extinction));
-        // Their contact shadows stay, so they stand on something instead of
-        // floating in the white.
-        if (onGround) col *= mix(1.0, robotShade, uVeil * 0.7);
-      } else {
-        col = mix(col, haze, uVeil);
-      }
+      if (tHit < 1e4) col = mix(haze, surf, exp(-tHit * 0.09));
 
       vec4 acc = raymarchClouds(ro, rd, tHit);
       col = mix(col, acc.rgb, acc.a);
@@ -416,10 +295,10 @@ document.addEventListener('DOMContentLoaded', () => {
   let contextLost = false;
   let uResolution, uTime, uCloudColor, uDensity, uPuffiness, uTurbulence, uHeight;
   let uCamPos, uYaw, uPitch, uRoll;
-  let uSpotTex, uSpotLoaded, uSpotA, uSpotB, uVeil, uProps, uPropCount;
-  let fogProgram, quadBuffer, quadPosLoc, propTex;
+  let uSpotTex, uSpotLoaded, uSpotA, uSpotB;
+  let fogProgram, quadBuffer, quadPosLoc;
   let spot = null;
-  // Spot takes the orders; Echo keeps a place relative to it.
+  // Spot carries the ball; Echo is the one chasing it.
   let spotGait = null;
   let echoGait = null;
 
@@ -468,9 +347,6 @@ document.addEventListener('DOMContentLoaded', () => {
     uSpotLoaded = gl.getUniformLocation(program, 'uSpotLoaded');
     uSpotA = gl.getUniformLocation(program, 'uSpotA');
     uSpotB = gl.getUniformLocation(program, 'uSpotB');
-    uVeil = gl.getUniformLocation(program, 'uVeil');
-    uProps = gl.getUniformLocation(program, 'uProps');
-    uPropCount = gl.getUniformLocation(program, 'uPropCount');
 
     // The fog scene still works if the robot can't be drawn for some reason.
     if (window.createSpotRenderer) {
@@ -492,18 +368,6 @@ document.addEventListener('DOMContentLoaded', () => {
     uYaw = gl.getUniformLocation(program, 'uYaw');
     uPitch = gl.getUniformLocation(program, 'uPitch');
     uRoll = gl.getUniformLocation(program, 'uRoll');
-
-    propTex = gl.createTexture();
-    gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, propTex);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, MAX_PROPS, 2, 0, gl.RGBA, gl.UNSIGNED_BYTE, propBytes);
-    gl.activeTexture(gl.TEXTURE0);
-    // On a restore this puts the place the visitor was in back, not the default.
-    if (Site) applySite(Site.find(siteId) || Site.find('yard'));
 
     resize();
   }
@@ -533,33 +397,82 @@ document.addEventListener('DOMContentLoaded', () => {
     camera.pos[1] += forward[1] * forwardAmt * dist;
     camera.pos[2] += (forward[2] * forwardAmt + right[2] * strafeAmt) * dist;
     camera.pos[1] = Math.max(MIN_CAMERA_Y, camera.pos[1]);
+    touchedAt = clock;
   }
 
-  // While the robots are walking they would otherwise stroll straight out of
-  // frame, so the camera eases its heading to keep the middle of the pair in
-  // view. It never moves itself, stops inside a dead zone so small steps don't
-  // drag the view around, and a drag always wins.
-  const TRACK_DEAD_ZONE = 0.22;
+  // A chase runs away from a tripod, so the camera covers it: it keeps its
+  // heading on the middle of the pair and holds a working distance, backing
+  // off when they come at it and closing when they get away. The dead zone
+  // keeps small steps from dragging the view around. Anything the visitor
+  // does — a drag, a fly, a pinch — hands the camera over for a few seconds.
+  const TRACK_DEAD_ZONE = 0.18;
+  const TRACK_RANGE = 2.9;
+  const TRACK_EYE = 1.3;
+  const HANDOVER = 6;
+  // Where the camera wants to stand relative to the way they are running:
+  // a cut seen from straight behind is just a robot getting smaller, so it
+  // slides around until their line of travel crosses the frame.
+  const COVER = { lo: 1.25, hi: 2.6, want: 1.95, rate: 0.5 };
 
   function trackPair(dt) {
     if (!dt || dragging || pov || !spotGait || !echoGait) return;
-    const still = (g) => Math.abs(g.state.speed) < 0.05 && Math.abs(g.state.turn) < 0.05;
-    if (still(spotGait) && still(echoGait)) return;
-    const dx = (spotGait.state.pos[0] + echoGait.state.pos[0]) / 2 - camera.pos[0];
-    const dz = (spotGait.state.pos[2] + echoGait.state.pos[2]) / 2 - camera.pos[2];
-    if (Math.hypot(dx, dz) < 1.2) return;
+    if (clock - touchedAt < HANDOVER) return;
+    const mx = (spotGait.state.pos[0] + echoGait.state.pos[0]) / 2;
+    const mz = (spotGait.state.pos[2] + echoGait.state.pos[2]) / 2;
+    const dx = mx - camera.pos[0];
+    const dz = mz - camera.pos[2];
+    const flat = Math.hypot(dx, dz);
+
     // Camera forward is (sin yaw, *, cos yaw).
-    let err = Math.atan2(dx, dz) - camera.yaw;
-    while (err > Math.PI) err -= 2 * Math.PI;
-    while (err < -Math.PI) err += 2 * Math.PI;
-    if (Math.abs(err) < TRACK_DEAD_ZONE) return;
-    const aim = err - Math.sign(err) * TRACK_DEAD_ZONE;
-    camera.yaw += Math.max(-1.2, Math.min(1.2, aim * 2.2)) * dt;
+    if (flat > 0.8) {
+      let err = Math.atan2(dx, dz) - camera.yaw;
+      while (err > Math.PI) err -= 2 * Math.PI;
+      while (err < -Math.PI) err += 2 * Math.PI;
+      if (Math.abs(err) > TRACK_DEAD_ZONE) {
+        const aim = err - Math.sign(err) * TRACK_DEAD_ZONE;
+        // Well off the side, or behind: that is not a nudge, that is a swing.
+        const rate = Math.abs(err) > 0.9 ? 4.2 : 2.6;
+        camera.yaw += clamp(aim * rate, -3, 3) * dt;
+      }
+    }
+
+    // Slide around them when the angle goes bad, at a walking pace so the
+    // move reads as coverage rather than the world spinning.
+    if (flat > 1.5) {
+      const travel = Math.atan2(Math.cos(spotGait.state.yaw), -Math.sin(spotGait.state.yaw));
+      const bear = Math.atan2(-dx, -dz);
+      let rel = bear - travel;
+      while (rel > Math.PI) rel -= 2 * Math.PI;
+      while (rel < -Math.PI) rel += 2 * Math.PI;
+      const side = rel < 0 ? -1 : 1;
+      const mag = Math.abs(rel);
+      if (mag < COVER.lo || mag > COVER.hi) {
+        // bear points from the pair out to the camera, so the new position is
+        // that bearing turned by a step, at the same range.
+        const step = clamp(side * COVER.want - rel, -COVER.rate * dt, COVER.rate * dt);
+        camera.pos[0] = mx + Math.sin(bear + step) * flat;
+        camera.pos[2] = mz + Math.cos(bear + step) * flat;
+      }
+    }
+
+    // Hold the range along the ground, not along the view axis, so a tilted
+    // camera doesn't fly itself into the dirt correcting its distance.
+    const gap = flat - TRACK_RANGE;
+    if (Math.abs(gap) > 0.6 && flat > 1e-3) {
+      const k = clamp(gap * 1.1, -2.6, 2.6) * dt;
+      camera.pos[0] += (dx / flat) * k;
+      camera.pos[2] += (dz / flat) * k;
+    }
+    camera.pos[1] += (TRACK_EYE - camera.pos[1]) * (1 - Math.exp(-dt / 1.2));
+    // Aim down at them by however much the eye height calls for.
+    const want = Math.atan2(0.55 - camera.pos[1], Math.max(2, flat));
+    camera.pitch += (want - camera.pitch) * (1 - Math.exp(-dt / 1.2));
   }
 
   // Pinch spread/pinch on mobile dollies forward/back along the view
   // direction — there's no real "zoom" to give since the FOV is fixed.
   function dollyCamera(amount) {
+    touchedAt = clock;
     const forward = forwardVector();
     camera.pos[0] += forward[0] * amount;
     camera.pos[1] += forward[1] * amount;
@@ -579,9 +492,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const dt = lastFrameTime ? Math.min((t - lastFrameTime) / 1000, 0.1) : 0;
     lastFrameTime = t;
     updateCamera(dt);
-
     resize();
-    const time = t * 0.001;
+
+    // A cut at close quarters drops the scene into slow motion for a beat and
+    // punches the camera. Input keeps running on the wall clock, so dragging
+    // never goes sticky while that plays out.
+    if (timeScale < 1) timeScale = Math.min(1, timeScale + dt / 0.5);
+    if (shake > 0) shake = Math.max(0, shake - dt / 0.3);
+    const sim = dt * timeScale;
+    clock += sim;
 
     // The gait solver needs the link lengths out of the model file, so it can
     // only be built once that has landed.
@@ -589,34 +508,33 @@ document.addEventListener('DOMContentLoaded', () => {
       spotGait = window.createSpotGait(spot.getModel(), { pos: SPOT_POS, yaw: SPOT_YAW });
       echoGait = window.createSpotGait(spot.getModel(), { pos: ECHO_POS, yaw: SPOT_YAW });
       echoGait.pose.paint = ECHO_PAINT;
-      spotGait.setObstacles(props);
-      echoGait.setObstacles(props);
-      setRelation('abreast');
+      updateEchoLook();
       if (pendingText) {
         applyText(pendingText);
         pendingText = '';
       }
     }
 
-    tickCurtain(dt);
-    if (spotGait) {
-      tickQueue(dt);
-      tickScout(dt);
-      tickIdle(dt);
-    }
+    if (spotGait) tickChase(sim);
 
     let spotDrawn = false;
-    // Spot first: Echo's target is read off where Spot is this frame.
-    const pose = spotGait ? spotGait.update(dt, time) : null;
-    const echoPose = echoGait ? echoGait.update(dt, time) : null;
+    // Spot first: Echo reads off where Spot is this frame.
+    const pose = spotGait ? spotGait.update(sim, clock) : null;
+    const echoPose = echoGait ? echoGait.update(sim, clock) : null;
     if (echoPose) keepApart();
     trackPair(dt);
     if (pov && echoPose) rideHandCamera(echoPose);
+
+    // The punch is a render-time offset only: the camera the visitor is
+    // steering never actually moves, so it settles back exactly where it was.
+    const jolt = shake * shake;
+    const camYaw = camera.yaw + jolt * 0.024 * Math.sin(t * 0.043);
+    const camPitch = camera.pitch + jolt * 0.017 * Math.sin(t * 0.061);
     if (spot) {
-      const cy = Math.cos(camera.yaw);
-      const sy = Math.sin(camera.yaw);
-      const cp = Math.cos(camera.pitch);
-      const sp = Math.sin(camera.pitch);
+      const cy = Math.cos(camYaw);
+      const sy = Math.sin(camYaw);
+      const cp = Math.cos(camPitch);
+      const sp = Math.sin(camPitch);
       const cr = Math.cos(camRoll);
       const sr = Math.sin(camRoll);
       // Same basis the fog shader builds: level/sky from yaw and pitch, then
@@ -649,25 +567,16 @@ document.addEventListener('DOMContentLoaded', () => {
     const b = echoPose || { pos: ECHO_POS, yaw: SPOT_YAW };
     gl.uniform3f(uSpotA, a.pos[0], a.pos[2], a.yaw);
     gl.uniform3f(uSpotB, b.pos[0], b.pos[2], b.yaw);
-    const v = Math.min(1, Math.max(0, curtain.veil));
-    gl.uniform1f(uVeil, v * v * (3 - 2 * v));
-    // The robot target may have been resized on unit 0 since last frame, so
-    // the props go back on unit 1 every time rather than trusting it.
-    gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, propTex);
-    gl.uniform1i(uProps, 1);
-    gl.uniform1f(uPropCount, props.length);
-    gl.activeTexture(gl.TEXTURE0);
     gl.uniform2f(uResolution, canvas.width, canvas.height);
-    gl.uniform1f(uTime, time);
+    gl.uniform1f(uTime, clock);
     gl.uniform3f(uCloudColor, params.color[0], params.color[1], params.color[2]);
     gl.uniform1f(uDensity, params.density);
     gl.uniform1f(uPuffiness, params.puffiness);
     gl.uniform1f(uTurbulence, params.turbulence);
     gl.uniform1f(uHeight, params.height);
     gl.uniform3f(uCamPos, camera.pos[0], camera.pos[1], camera.pos[2]);
-    gl.uniform1f(uYaw, camera.yaw);
-    gl.uniform1f(uPitch, camera.pitch);
+    gl.uniform1f(uYaw, camYaw);
+    gl.uniform1f(uPitch, camPitch);
     gl.uniform1f(uRoll, camRoll);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     requestAnimationFrame(frame);
@@ -836,7 +745,6 @@ document.addEventListener('DOMContentLoaded', () => {
     if (pov) {
       parkedCamera = { pos: camera.pos.slice(), yaw: camera.yaw, pitch: camera.pitch };
     } else {
-      curtain.cut = false;
       if (parkedCamera) {
         camRoll = 0;
         camera.pos = parkedCamera.pos;
@@ -867,126 +775,280 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // --- the pair --------------------------------------------------------------
+  // --- the chase -------------------------------------------------------------
 
-  // Where Echo keeps itself relative to Spot, in Spot's body frame: meters
-  // forward, meters to the left. Far enough that Spot fits in Echo's camera
-  // once the arm has reached out toward it. `scout` and `free` have no fixed
-  // place.
-  const STANDOFF = { follow: [-2.2, 0], abreast: [0.2, -1.8] };
-  let relation = 'abreast';
-  // The place Echo goes back to after scouting or being told off on its own.
-  let pairRelation = 'abreast';
-  // While Echo is away looking at a prop: { prop, stage: 'going' | 'looking', t }.
-  let scout = null;
+  // Spot carries, Echo chases. Echo closes a little faster than Spot cruises,
+  // so it always eventually arrives — and then it has to commit to a dive,
+  // which is the moment Spot cuts out from under it. Nothing tags anybody:
+  // the drama is entirely in what the dive costs Echo when it misses.
+  //
+  // Both robots are driven straight from here. spot-gait.js turns a command
+  // into feet on the ground and nothing else, so every beat of the chase is a
+  // command written on a clock, which is what makes it tunable.
+
+  const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
+  const smoothstep = (t) => t * t * (3 - 2 * t);
+
+  // The middle of the ground the chase is run on.
+  const HOME = [SPOT_POS[0], 0, SPOT_POS[2]];
+
+  // Signed angle from where a robot is pointing to the direction (vx, vz),
+  // positive toward its left — the way a positive turn rate takes it.
+  function bearingFrom(g, vx, vz) {
+    const cy = Math.cos(g.state.yaw);
+    const sy = Math.sin(g.state.yaw);
+    return Math.atan2(vx * sy + vz * cy, vx * cy - vz * sy);
+  }
 
   const spotPoint = () => ({ x: spotGait.state.pos[0], z: spotGait.state.pos[2] });
 
-  function echoStandoff() {
+  // How Spot runs between cuts. A typed phrase writes into this, so "sprint"
+  // or "sneak" changes the cruise the chase is run at rather than being a
+  // one-off; the turn rate is the one thing the chase keeps for itself.
+  const CRUISE = {
+    gait: 'trot', speed: 1.45, strafe: 0, turn: 0, height: 0.50, stepHeight: 0.12,
+    cadence: 1.05, lean: 0.03, bank: 0, tau: 0.3, arm: 'auto', armAmp: 1,
+    label: 'running',
+  };
+  const cruise = Object.assign({}, CRUISE);
+
+  const CHASE = {
+    speed: 1.9,       // Echo's flat out, which is quicker than Spot cruises
+    standoff: 1.7,    // but it settles in at arm's length and paces him there
+    lungeAt: 2.15,    // before committing from somewhere inside this
+    lungeFor: 0.6,
+    lungeSpeed: 2.2,
+    carryFor: 0.45,   // how long the dive carries it past before it can brake
+    whiffFor: 1.25,
+    cooldown: 2.2,    // no second dive straight off the back of one
+    beaten: 1.4,      // a dive that never got this close was broken
+  };
+
+  const chase = { phase: 'close', t: 0, cool: 0, closest: Infinity };
+  let broken = 0;
+
+  // --- what Spot does about it ----------------------------------------------
+
+  // A cut is three beats: dip and fake one way, drive off the planted foot
+  // the other way, then run out of it. The short tau on the first two is what
+  // makes them land as beats instead of easing into each other.
+  function jukeMove(side) {
+    return { name: side > 0 ? 'cutting left' : 'cutting right', call: side > 0 ? 'cuts left' : 'cuts right', cut: 1, steps: [
+      { t: 0.20, cmd: { gait: 'trot', speed: 0.8, strafe: -0.2 * side, turn: -0.4 * side,
+        bank: -0.20 * side, height: 0.41, stepHeight: 0.07, cadence: 1.3, tau: 0.10, label: 'planting' } },
+      { t: 0.45, cmd: { gait: 'bound', speed: 0.95, strafe: 1.3 * side, turn: 1.6 * side,
+        bank: 0.36 * side, height: 0.44, stepHeight: 0.16, cadence: 1.35, tau: 0.09,
+        arm: 'reach', label: 'cutting' } },
+      { t: 0.8, cmd: { gait: 'bound', speed: 2.1, strafe: 0, turn: 0.3 * side, bank: 0.1 * side,
+        height: 0.50, stepHeight: 0.15, cadence: 1.25, tau: 0.18, arm: 'auto', label: 'breaking away' } },
+    ] };
+  }
+
+  // Same idea, but it turns its back on Echo and comes off the other side.
+  function spinMove(side) {
+    return { name: 'spinning', call: 'spins out of it', cut: 1, steps: [
+      { t: 0.18, cmd: { gait: 'trot', speed: 0.55, height: 0.42, cadence: 1.2, bank: -0.14 * side,
+        tau: 0.10, label: 'planting' } },
+      { t: 0.7, cmd: { gait: 'trot', speed: 0.45, turn: 2.7 * side, bank: 0.3 * side, height: 0.44,
+        stepHeight: 0.13, cadence: 1.45, tau: 0.10, arm: 'reach', label: 'spinning' } },
+      { t: 0.5, cmd: { gait: 'bound', speed: 1.85, turn: 0.2 * side, bank: 0.08 * side, height: 0.50,
+        stepHeight: 0.15, cadence: 1.2, tau: 0.2, arm: 'auto', label: 'breaking away' } },
+    ] };
+  }
+
+  // Straight over the top of the dive instead of around it.
+  function hurdleMove() {
+    return { name: 'hurdling', call: 'goes over the top', cut: 1, steps: [
+      { t: 0.16, cmd: { gait: 'trot', speed: 0.9, height: 0.40, stepHeight: 0.07, cadence: 1.3,
+        lean: -0.05, tau: 0.09, label: 'gathering' } },
+      { t: 0.5, cmd: { gait: 'bound', speed: 1.7, height: 0.57, stepHeight: 0.2, cadence: 0.8,
+        lean: 0.1, tau: 0.09, label: 'hurdling' } },
+      { t: 0.45, cmd: { gait: 'bound', speed: 1.9, height: 0.50, stepHeight: 0.15, cadence: 1.2,
+        lean: 0.05, tau: 0.2, label: 'breaking away' } },
+    ] };
+  }
+
+  // The move being run right now, and anything typed to follow it.
+  let move = null;
+  let queued = [];
+
+  function startMove(m) {
+    move = { steps: m.steps, name: m.name, call: m.call, cut: !!m.cut, i: -1, t: 0 };
+    nextBeat();
+  }
+
+  function nextBeat() {
+    move.i += 1;
+    move.t = 0;
+    if (move.i >= move.steps.length) {
+      move = null;
+      return;
+    }
+    const beat = move.steps[move.i];
+    spotGait.setCommand(Object.assign({}, cruise, beat.cmd));
+    // The cut itself is the moment worth slowing down for, and only when
+    // Echo is close enough that it costs it something.
+    if (move.cut && move.i === 1 && !reducedMotion && echoGait) {
+      const d = Math.hypot(spotGait.state.pos[0] - echoGait.state.pos[0],
+        spotGait.state.pos[2] - echoGait.state.pos[2]);
+      if (d < 2.6) {
+        timeScale = 0.45;
+        shake = 1;
+      }
+    }
+  }
+
+  // Which way to cut. Away from Echo when it has committed to a side; when it
+  // is coming straight up the back there is no wrong answer, so alternate
+  // rather than break the same way every time. Either way, never cut so wide
+  // that the next ten meters are fog.
+  let lastSide = -1;
+
+  function cutSide() {
     const s = spotGait.state;
-    const off = STANDOFF[relation] || STANDOFF[pairRelation];
-    const fx = Math.cos(s.yaw);
-    const fz = -Math.sin(s.yaw);
-    const x = s.pos[0] + fx * off[0] + Math.sin(s.yaw) * off[1];
-    const z = s.pos[2] + fz * off[0] + Math.cos(s.yaw) * off[1];
-    return {
-      x, z, radius: 0.3,
-      speed: s.speed, turn: s.turn, yaw: s.yaw, gait: spotGait.command.gait,
-      // Parked, it looks the way Spot looks.
-      faceX: x + fx * 3, faceZ: z + fz * 3,
-    };
+    const e = echoGait.state;
+    const toEcho = bearingFrom(spotGait, e.pos[0] - s.pos[0], e.pos[2] - s.pos[2]);
+    let side = Math.abs(toEcho) < 2.3 ? (toEcho > 0 ? -1 : 1) : -lastSide;
+    const toHome = bearingFrom(spotGait, HOME[0] - s.pos[0], HOME[2] - s.pos[2]);
+    const wide = Math.hypot(s.pos[0] - HOME[0], s.pos[2] - HOME[2]) > 3.2;
+    if (wide && Math.abs(toHome) > 0.5 && Math.sign(toHome) !== side) side = Math.sign(toHome);
+    lastSide = side;
+    return side;
   }
 
-  // A point just clear of the prop, on whichever side the robot is coming from.
-  function propApproach(g, prop) {
-    return () => {
-      let dx = g.state.pos[0] - prop.x;
-      let dz = g.state.pos[2] - prop.z;
-      const len = Math.hypot(dx, dz) || 1;
-      dx /= len;
-      dz /= len;
-      const reach = (prop.round ? prop.hx : Math.abs(dx) * prop.hx + Math.abs(dz) * prop.hz) + 0.62;
-      return { x: prop.x + dx * reach, z: prop.z + dz * reach, radius: 0.3, faceX: prop.x, faceZ: prop.z, prop };
-    };
+  // Cruising: hold the commanded run, and bend it back toward the middle so
+  // the chase keeps happening in front of the camera instead of off in the fog.
+  function tickCruise() {
+    const s = spotGait.state;
+    const dx = HOME[0] - s.pos[0];
+    const dz = HOME[2] - s.pos[2];
+    const dist = Math.hypot(dx, dz);
+    const pull = smoothstep(clamp((dist - 1.8) / 2.4, 0, 1));
+    const wander = 0.34 * Math.sin(clock * 0.37) * (1 - pull);
+    const inward = bearingFrom(spotGait, dx, dz);
+    const turn = cruise.speed > 0.15 ? clamp(wander + 1.4 * pull * inward, -1.1, 1.1) : 0;
+    spotGait.setCommand(Object.assign({}, cruise, { turn }));
   }
 
-  function partnerOf(g) {
-    const other = g === spotGait ? echoGait : spotGait;
-    return () => ({ x: other.state.pos[0], z: other.state.pos[2], radius: 1.1 });
+  function tickSpot(dt) {
+    if (!move && queued.length) startMove(queued.shift());
+    if (!move) {
+      tickCruise();
+      return;
+    }
+    move.t += dt;
+    if (move.t >= move.steps[move.i].t) nextBeat();
   }
 
-  function nearestProp(g, kind, minDist) {
-    let best = null;
-    let bestD = Infinity;
-    props.forEach((p) => {
-      if (kind && p.kind !== kind) return;
-      const d = Math.hypot(p.x - g.state.pos[0], p.z - g.state.pos[2]);
-      if (d >= (minDist || 0) && d < bestD) {
-        best = p;
-        bestD = d;
+  // --- what Echo does about it ----------------------------------------------
+
+  function tickEcho(dt, dist, aim) {
+    if (chase.cool > 0) chase.cool -= dt;
+    chase.t += dt;
+
+    if (chase.phase === 'lunge') {
+      chase.closest = Math.min(chase.closest, dist);
+      if (chase.t < CHASE.lungeFor) return;
+      // The dive is spent. Whether it was worth it is just how close it got.
+      chase.phase = 'whiff';
+      chase.t = 0;
+      chase.cool = CHASE.cooldown;
+      if (chase.closest > CHASE.beaten) {
+        broken += 1;
+        flash(`${broken === 1 ? 'Broken tackle' : `${broken} broken tackles`} · Echo went past`, 2);
+      } else {
+        flash('Echo gets a hand on him \u2014 Spot stays up', 1.6);
       }
+      return;
+    }
+
+    if (chase.phase === 'whiff') {
+      // A dive that misses doesn't stop where it missed: Echo is carried past
+      // first, and only then gets the feet back under it and turns around.
+      const carried = chase.t < CHASE.carryFor;
+      echoGait.setCommand({
+        gait: carried ? 'bound' : 'trot',
+        speed: carried ? 1.5 : 0.35,
+        strafe: 0,
+        turn: carried ? clamp(0.5 * aim, -0.6, 0.6) : clamp(2.4 * aim, -2.4, 2.4),
+        height: carried ? 0.44 : 0.46, stepHeight: carried ? 0.15 : 0.1,
+        cadence: carried ? 1.2 : 1, lean: carried ? 0.08 : -0.05, bank: 0,
+        tau: carried ? 0.2 : 0.14, arm: 'auto',
+        label: carried ? 'carried past' : 'turning back',
+      });
+      if (chase.t > CHASE.whiffFor) {
+        chase.phase = 'close';
+        chase.t = 0;
+      }
+      return;
+    }
+
+    // Closing: run at the point Spot is heading for rather than where it is,
+    // since a pure tail chase never actually catches up to anything. Inside
+    // the standoff it just paces him — everything closer has to be dived for.
+    const pace = Math.abs(spotGait.state.speed);
+    const want = Math.max(0, Math.min(CHASE.speed, pace + 0.75 * (dist - CHASE.standoff)))
+      * (1 - 0.75 * smoothstep(clamp((Math.abs(aim) - 0.45) / 1.0, 0, 1)));
+    echoGait.setCommand({
+      gait: want > 1.05 ? 'bound' : want > 0.35 ? 'trot' : 'walk',
+      speed: want, strafe: 0, turn: clamp(2.4 * aim, -2.2, 2.2),
+      height: 0.48, stepHeight: 0.12, cadence: 1.1, lean: 0.05, bank: 0, tau: 0.24,
+      arm: 'auto', label: 'chasing',
     });
-    return best;
-  }
 
-  function setRelation(rel) {
-    scout = null;
-    relation = rel;
-    if (rel === 'follow' || rel === 'abreast') {
-      pairRelation = rel;
-      echoGait.setTarget(echoStandoff);
-    } else if (rel === 'free') {
-      echoGait.setTarget(null);
-      echoGait.setCommand({ gait: 'stand', speed: 0, strafe: 0, turn: 0, label: 'standing' });
-    }
-    updateEchoLook();
-  }
-
-  function startScout(prop) {
-    if (!prop) return false;
-    setRelation('scout');
-    scout = { prop, stage: 'going', t: 0 };
-    echoGait.setTarget(propApproach(echoGait, prop));
-    return true;
-  }
-
-  function tickScout(dt) {
-    if (!scout) return;
-    scout.t += dt;
-    if (scout.stage === 'going' && (echoGait.arrived() || scout.t > 14)) {
-      scout.stage = 'looking';
-      scout.t = 0;
-      updateEchoLook();
-    } else if (scout.stage === 'looking' && scout.t > 3.5) {
-      setRelation(pairRelation);
-      if (statusEl && statusEl.textContent.includes('Echo scouting')) {
-        setStatus(statusEl.textContent.replace(/Echo scouting the \w+/, echoSays()));
+    // Committed, and it cannot steer out of it — which is what a cut is for.
+    if (chase.cool <= 0 && dist < CHASE.lungeAt && Math.abs(aim) < 0.8 && cruise.speed > 0.4) {
+      chase.phase = 'lunge';
+      chase.t = 0;
+      chase.closest = dist;
+      echoGait.setCommand({
+        gait: 'bound', speed: CHASE.lungeSpeed, strafe: 0, turn: clamp(1.5 * aim, -1.2, 1.2),
+        height: 0.42, stepHeight: 0.18, cadence: 1.35, lean: 0.12, bank: 0, tau: 0.10,
+        // The arm goes out with the dive, unless somebody is riding it: a
+        // camera operator keeps the shot rather than joining in.
+        arm: pov ? 'auto' : 'reach', label: 'diving',
+      });
+      // Spot sees it coming. A typed move already in flight has the right of
+      // way — the visitor's cut beats the automatic one.
+      if (!move && !queued.length) {
+        const m = jukeMove(cutSide());
+        startMove(m);
+        flash(`Echo dives — Spot ${m.call}`, 1.4);
       }
     }
   }
 
-  // Echo's arm holds the camera up whenever someone might be looking through
-  // it: at the prop it is scouting, otherwise at Spot.
-  function updateEchoLook() {
-    if (!echoGait) return;
-    if (scout && scout.stage === 'looking') {
-      const prop = scout.prop;
-      echoGait.setLook(true, () => ({ x: prop.x, z: prop.z }));
-    } else if (pov || curtain.phase !== 'open') {
-      echoGait.setLook(true, spotPoint);
+  function tickChase(dt) {
+    const s = spotGait.state;
+    const e = echoGait.state;
+    const dx = s.pos[0] - e.pos[0];
+    const dz = s.pos[2] - e.pos[2];
+    const dist = Math.hypot(dx, dz);
+    // Echo aims where Spot will be, not where it is.
+    const lead = clamp(dist / 3.4, 0, 0.5);
+    const aim = bearingFrom(echoGait,
+      dx + Math.cos(s.yaw) * s.speed * lead,
+      dz - Math.sin(s.yaw) * s.speed * lead);
+
+    tickSpot(dt);
+    if (echoHold > 0) {
+      echoHold -= dt;
+      echoGait.setCommand({ gait: 'stand', speed: 0, strafe: 0, turn: 0, bank: 0, tau: 0.3, label: 'holding' });
     } else {
-      echoGait.setLook(false);
+      tickEcho(dt, dist, aim);
     }
+    updateStatus(dt, dist);
   }
 
-  // Whatever the servo does, the two bodies never overlap; Echo gives way.
+  // Whatever the chase does, the two bodies never overlap: Echo is stopped at
+  // arm's length, which is what makes a dive a near miss instead of a pile-up.
   function keepApart() {
     const a = spotGait.state.pos;
     const b = echoGait.state.pos;
     let dx = b[0] - a[0];
     let dz = b[2] - a[2];
     const d = Math.hypot(dx, dz);
-    const MIN_GAP = 0.95;
+    const MIN_GAP = 1.15;
     if (d >= MIN_GAP) return;
     if (d < 1e-4) {
       dx = 1;
@@ -1001,384 +1063,140 @@ document.addEventListener('DOMContentLoaded', () => {
     echoGait.pose.pos[2] = b[2];
   }
 
-  function echoSays() {
-    if (scout) return `Echo scouting the ${scout.prop.kind}`;
-    if (relation === 'follow') return 'Echo following';
-    if (relation === 'abreast') return 'Echo alongside';
-    return `Echo ${echoGait.hasTarget() ? 'heading off' : echoGait.describe(echoGait.command)}`;
+  // Echo holds the camera up on Spot whenever someone is looking through it.
+  function updateEchoLook() {
+    if (!echoGait) return;
+    echoGait.setLook(pov, spotPoint);
   }
 
-  // --- places and the fog curtain -------------------------------------------
+  // --- the line under the box ------------------------------------------------
 
-  const propBytes = new Uint8Array(MAX_PROPS * 2 * 4);
-  let props = [];
-  let siteId = null;
-  let siteTitle = '';
+  // Events pin a line for a moment; the rest of the time it is a live readout
+  // of how much room Spot has left.
+  let pinned = 0;
+  let statusAt = 0;
 
-  function applySite(site) {
-    const keepOut = [];
-    [spotGait || { state: { pos: SPOT_POS } }, echoGait || { state: { pos: ECHO_POS } }].forEach((g) => {
-      keepOut.push({ x: g.state.pos[0], z: g.state.pos[2], r: 0.8 });
-    });
-    const eye = parkedCamera ? parkedCamera.pos : camera.pos;
-    if (eye[1] < 2.2) keepOut.push({ x: eye[0], z: eye[2], r: 0.8 });
-    props = Site.place(site, SPOT_POS, keepOut);
-    siteId = site.id;
-    siteTitle = site.title;
-    Site.pack(props, SPOT_POS, propBytes);
-    gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, propTex);
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, MAX_PROPS, 2, gl.RGBA, gl.UNSIGNED_BYTE, propBytes);
-    gl.activeTexture(gl.TEXTURE0);
-    if (siteEl) siteEl.textContent = site.props.length ? site.title : '';
-    if (spotGait) {
-      spotGait.setObstacles(props);
-      echoGait.setObstacles(props);
-      // Nobody keeps walking toward a prop that is no longer there.
-      if (scout) setRelation(pairRelation);
-      if (spotGait.hasTarget()) spotGait.setTarget(null);
-      if (relation === 'free' && echoGait.hasTarget()) echoGait.setTarget(null);
+  function flash(msg, hold) {
+    pinned = hold || 1.5;
+    setStatus(msg);
+  }
+
+  function updateStatus(dt, dist) {
+    if (pinned > 0) {
+      pinned -= dt;
+      return;
     }
+    statusAt -= dt;
+    if (statusAt > 0) return;
+    statusAt = 0.25;
+    const doing = move ? move.name
+      : cruise.speed < 0.15 ? 'standing'
+      : `${cruise.label} at ${spotGait.state.speed.toFixed(1)} m/s`;
+    const gap = `Echo ${dist.toFixed(1)} m`;
+    const tail = chase.phase === 'lunge' ? 'diving'
+      : chase.phase === 'whiff' ? 'turning around'
+      : echoHold > 0 ? 'holding off'
+      : dist < 2.6 ? 'closing' : 'chasing';
+    setStatus(`Spot ${doing} · ${gap} ${tail}${broken ? ` · ${broken} broken` : ''}`);
   }
 
-  // Changing place happens behind the fog. It closes over everything but the
-  // robots, the view cuts to Echo's arm camera on Spot, the props change while
-  // nothing can be seen, the fog lifts on the new place from Echo's side, and
-  // then the view cuts back. A place that has to be asked for (a promise)
-  // keeps the fog closed until it answers, or until patience runs out.
-  const CURTAIN = { close: 0.7, hold: 0.5, lift: 1.6, linger: 1.4, patience: 9 };
-  const curtain = { phase: 'open', t: 0, veil: 0, site: null, ready: false, error: null, cut: false, token: 0 };
-  const reducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-
-  function drawCurtain(siteOrPromise) {
-    const token = ++curtain.token;
-    curtain.site = null;
-    curtain.ready = false;
-    curtain.error = null;
-    Promise.resolve(siteOrPromise).then((site) => {
-      if (token !== curtain.token) return;
-      curtain.site = site;
-      curtain.ready = true;
-    }, (err) => {
-      if (token !== curtain.token) return;
-      curtain.error = err;
-      curtain.ready = true;
-    });
-    if (curtain.phase !== 'closing' && curtain.phase !== 'closed') {
-      // From wherever the veil already is, so a second place mid-lift
-      // doesn't snap.
-      curtain.phase = 'closing';
-      curtain.t = curtain.veil * CURTAIN.close;
-    }
-    updateEchoLook();
-  }
-
-  function curtainBusy() {
-    return curtain.phase === 'closing' || curtain.phase === 'closed';
-  }
-
-  function tickCurtain(dt) {
-    if (curtain.phase === 'open') return;
-    curtain.t += dt;
-    if (curtain.phase === 'closing') {
-      curtain.veil = Math.min(1, curtain.t / CURTAIN.close);
-      if (curtain.veil >= 1) {
-        curtain.phase = 'closed';
-        curtain.t = 0;
-        if (!pov && !reducedMotion && spotGait) {
-          setPov(true);
-          curtain.cut = true;
-        }
-      }
-    } else if (curtain.phase === 'closed') {
-      if ((curtain.ready && curtain.t > CURTAIN.hold) || curtain.t > CURTAIN.patience) {
-        if (curtain.site) {
-          applySite(curtain.site);
-          if (statusEl && statusEl.textContent.startsWith('Looking for')) setStatus('');
-        } else {
-          setStatus(curtain.error && curtain.error.message
-            ? curtain.error.message
-            : 'The fog came back empty \u2014 staying here.', true);
-        }
-        curtain.token++;
-        curtain.phase = 'lifting';
-        curtain.t = 0;
-      }
-    } else if (curtain.phase === 'lifting') {
-      curtain.veil = Math.max(0, 1 - curtain.t / CURTAIN.lift);
-      if (curtain.veil <= 0) {
-        curtain.phase = 'lingering';
-        curtain.t = 0;
-      }
-    } else if (curtain.phase === 'lingering' && curtain.t > CURTAIN.linger) {
-      curtain.phase = 'open';
-      if (curtain.cut) setPov(false);
-      updateEchoLook();
-    }
-  }
-
-  // Places nobody built in: a Gemini call through the worker, one at a time
-  // and not too often, remembered for the rest of the visit.
-  const asked = new Map();
-  let lastAskAt = -Infinity;
-  const ASK_COOLDOWN = 15;
-
-  function askForPlace(text) {
-    const key = text.toLowerCase().replace(/[^\p{L}\p{N} ]/gu, '').trim();
-    if (asked.has(key)) return asked.get(key);
-    lastAskAt = clock;
-    const request = fetch(CLOUD_ENDPOINT, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: text.slice(0, 60) }),
-    })
-      .then((res) => res.json().catch(() => ({})).then((body) => {
-        if (!res.ok) throw new Error(body.error || 'Could not reach the field server \u2014 staying here.');
-        const site = Site.fromReply(body);
-        if (!site) throw new Error('That place came back empty \u2014 staying here.');
-        return site;
-      }));
-    asked.set(key, request);
-    request.catch(() => asked.delete(key));
-    return request;
-  }
-
-  // --- text -> the pair ------------------------------------------------------
+  // --- text -> the carrier ---------------------------------------------------
 
   // Parsing lives in the gait solver, so a phrase typed before the model has
   // landed waits here and runs the moment the solver exists.
   let pendingText = '';
+  // Seconds Echo stands off for, when it has been told to.
+  let echoHold = 0;
 
-  // One phrase can be several steps: "walk to the crates, stop, then wave".
-  // Never on a bare "and", which too often joins one instruction.
+  // One phrase can be several moves: "juke left, then spin".
   const SPLIT = /\s*(?:[,;]|\band then\b|\bthen\b|\bafter that\b|그리고|그 ?다음에?|다음에)\s*/i;
-  const NAMES = [
-    { who: 'both', re: /\b(both( of you)?|you two|the two of you|the pair|everyone)\b|둘 ?다|둘이|모두/i },
-    { who: 'echo', re: /\becho\b|에코/i },
-    { who: 'spot', re: /\bspot\b|스팟/i },
-  ];
-  // What Echo does relative to Spot. Stripped before the gait parser sees
-  // the words, since "come back" would read as backing up and "stay side by
-  // side" as standing still.
-  const RELATIONS = [
-    { rel: 'follow', re: /\b(follow(ing)?( me| him| it| spot| along)?|tag along|fall in behind|get behind)\b|따라/i },
-    { rel: 'abreast', re: /\b(side by side|abreast|alongside|next to (each other|spot)|together)\b|나란히|옆에서|함께/i },
-    { rel: 'scout', re: /\b(scout( ahead)?|explore|go look|check (it|that) out)\b|정찰|탐색|살펴/i },
-    { rel: 'regroup', re: /\b(regroup|come back|come here|return|back to spot|rejoin)\b|돌아와|모여|이리 ?와|합류/i },
-    { rel: 'free', re: /\b(split up|separate(ly)?|on your own|go your own way|alone)\b|흩어|따로|혼자/i },
-  ];
+  const JUKE = /\b(juke|jou?ke|cut|jink|sidestep|side-?step|shake|fake|dodge)\b|저크|페이크|제치|제껴|꺾|틀어/i;
+  const SPIN = /\b(spin|whirl|twirl|pirouette|reverse)\b|스핀|회전|돌아|돌려/i;
+  const HURDLE = /\b(hurdle|vault|jump over|leap over|뛰어넘|넘어|허들|점프)\b/i;
+  const LEFT = /\b(left|port)\b|왼|좌측/i;
+  const RIGHT = /\b(right|starboard)\b|오른|우측/i;
+  const ECHO_WHO = /\becho\b|에코/i;
+  const ECHO_OFF = /\b(back off|stand off|hold|wait|stay|ease up|give (him|spot) room)\b|물러|기다|비켜|떨어져/i;
+  const ECHO_ON = /\b(chase|go|get (him|spot)|after him|press)\b|잡아|쫓|가|붙어/i;
   const LOOK = /\bwhat (do|can|did) (you|they|we) see\b|\bwhat'?s (there|around|out there|in front)\b|\bdescribe\b|\blook around\b|뭐가 ?보|뭐 ?보여|무엇이 ?보|보이는 ?(게|것)|주변 ?(을 ?)?설명/i;
-  const TO_WORD = /\b(?:over |up )?(?:to|toward|towards)\s+(?:the |a |an |that |this |your |each )?([a-z]+)/i;
-  const KO_TO = /([가-힣]+?)(쪽으로|한테로|에게로|한테|에게|으로|까지|로|에)(?=\s|$)/g;
-  const PARTNER = /^(other|partner|friend|echo|spot|에코|스팟|친구|서로)$/i;
 
-  // One clause into steps. ctx carries who is being addressed from one clause
-  // to the next, so "Echo, trot, then stop" is all Echo.
+  // Which way a cut goes when the phrase doesn't say: away from Echo.
+  function sideFrom(text) {
+    if (LEFT.test(text)) return 1;
+    if (RIGHT.test(text)) return -1;
+    return cutSide();
+  }
+
+  // A clause is either a move to run, a change to the cruise, or a word to
+  // Echo. ctx carries who is being spoken to from one clause to the next, so
+  // "echo, back off" survives being split on its own comma. Returns false for
+  // anything it couldn't make sense of.
   function readClause(clause, ctx) {
-    let text = ` ${clause} `;
-    const steps = [];
+    const text = ` ${clause} `;
 
-    if (LOOK.test(text)) return [{ look: true }];
-
-    // The first robot named is the one being talked to; a second one named
-    // is who it's talking about.
-    let first = null;
-    NAMES.forEach((n) => {
-      const m = text.match(n.re);
-      if (m && (!first || m.index < first.index)) first = { who: n.who, index: m.index };
-    });
-    if (first) ctx.who = first.who;
-    const who = ctx.who;
-
-    let relation = null;
-    RELATIONS.forEach((r) => {
-      if (!relation && r.re.test(text)) {
-        relation = r.rel;
-        text = text.replace(r.re, ' ');
-      }
-    });
-
-    // "to the crates", "상자로": a prop kind, or the other robot.
-    let to = null;
-    const en = text.match(TO_WORD);
-    if (en) {
-      const kind = Site.kindOf(en[1]);
-      if (kind) to = { kind };
-      else if (PARTNER.test(en[1])) to = { partner: true };
-      if (to) text = text.replace(en[0], ' ');
-    }
-    if (!to) {
-      let m;
-      KO_TO.lastIndex = 0;
-      while (!to && (m = KO_TO.exec(text))) {
-        const kind = Site.kindOf(m[1]);
-        if (kind) to = { kind };
-        else if (PARTNER.test(m[1])) to = { partner: true };
-        if (to) text = text.replace(m[0], ' ');
-      }
+    if (LOOK.test(text)) {
+      flash(describeView(), 3);
+      return true;
     }
 
-    const place = Site.match(text);
-    if (place) text = text.replace(place.words, ' ');
-    NAMES.forEach((n) => { text = text.replace(n.re, ' '); });
-
-    let cmd = text.trim() ? spotGait.parse(text) : null;
-    if (to && (!cmd || cmd.gait === 'stand')) {
-      cmd = Object.assign(cmd || {}, { gait: 'walk', speed: 0.55, label: 'walking' });
-    }
-
-    if (place) steps.push({ site: place });
-    if (to && to.kind && !place && !props.some((p) => p.kind === to.kind)) {
-      const home = Site.withKind(to.kind);
-      if (home) steps.push({ site: home });
-    }
-    if (relation) steps.push({ who, relation, to });
-    else if (to || cmd) steps.push({ who, cmd, to });
-
-    // A bare name is an address, not an instruction.
-    if (!steps.length && first && !text.replace(/[^\p{L}\p{N}]/gu, '')) return [];
-    return steps.length ? steps : null;
-  }
-
-  function styleOf(cmd) {
-    return {
-      gait: cmd.gait, height: cmd.height, stepHeight: cmd.stepHeight, cadence: cmd.cadence,
-      lean: cmd.lean, label: cmd.label, speed: 0, strafe: 0, turn: 0,
-    };
-  }
-
-  // Starts a step and returns when it is done, as a function of how long it
-  // has been running. The last step of a phrase is never done: it is what the
-  // pair keeps doing.
-  function runStep(step) {
-    if (step.look) {
-      setStatus(describeView());
-      return () => true;
-    }
-    if (step.site) {
-      drawCurtain(step.site);
-      return () => !curtainBusy();
-    }
-
-    const who = step.who || 'spot';
-    if (step.relation) {
-      if (step.relation === 'scout') {
-        const prop = step.to && step.to.kind ? nearestProp(echoGait, step.to.kind) : nearestProp(echoGait, null, 1.2);
-        if (!startScout(prop)) setStatus('Nothing out here to scout \u2014 name a place first, like "warehouse".');
-        else setStatus(`Spot ${spotGait.describe(spotGait.command)} \u00b7 ${echoSays()}`);
-        return () => !scout || scout.stage === 'looking';
-      }
-      setRelation(step.relation === 'regroup' ? pairRelation : step.relation);
-      setStatus(`Spot ${spotGait.describe(spotGait.command)} \u00b7 ${echoSays()}`);
-      return (t) => relation === 'free' || echoGait.arrived() || t > 4;
-    }
-
-    const cmd = step.cmd;
-    if (who === 'echo') {
-      relation = 'free';
-      scout = null;
-      if (cmd) echoGait.setCommand(cmd);
-      if (step.to) {
-        const prop = step.to.kind && nearestProp(echoGait, step.to.kind);
-        if (step.to.partner) setRelation(pairRelation);
-        else if (prop) echoGait.setTarget(propApproach(echoGait, prop));
-        else echoGait.setTarget(null);
-      } else {
-        echoGait.setTarget(null);
-      }
-      updateEchoLook();
-      setStatus(step.to && step.to.kind
-        ? `Echo heading to the ${step.to.kind} \u00b7 Spot ${spotGait.describe(spotGait.command)}`
-        : `${echoSays()} \u00b7 Spot ${spotGait.describe(spotGait.command)}`);
-      return (t) => (step.to ? echoGait.arrived() || t > 15 : t > (cmd && cmd.gait !== 'stand' ? 3 : 1.2));
-    }
-
-    // Spot, or both: Spot does it and Echo comes along the way it was.
-    if (who === 'both' && relation !== 'follow' && relation !== 'abreast') setRelation(pairRelation);
-    if (cmd) spotGait.setCommand(cmd);
-    if (relation !== 'free' && cmd) echoGait.setCommand(styleOf(cmd));
-    if (!step.to) {
-      spotGait.setTarget(null);
-      setStatus(`Spot ${spotGait.describe(spotGait.command)} \u00b7 ${echoSays()}`);
-      return (t) => t > (cmd && cmd.gait !== 'stand' ? 3 : 1.2);
-    }
-    const going = spotGait.command.label && spotGait.command.label !== 'standing' ? spotGait.command.label : 'walking';
-    if (step.to.partner) {
-      spotGait.setTarget(partnerOf(spotGait));
-      setStatus(`Spot ${going} over to Echo`);
-      // Once there it stops for good: left pointed at Echo, it would turn
-      // after Echo forever while Echo walks around to its own place.
-      return (t) => {
-        if (!spotGait.arrived() && t < 15) return false;
-        spotGait.setTarget(null);
-        spotGait.setCommand({ gait: 'stand', speed: 0, strafe: 0, turn: 0, label: 'standing' });
+    const named = ECHO_WHO.test(text);
+    if (named) ctx.who = 'echo';
+    if (ctx.who === 'echo') {
+      if (ECHO_OFF.test(text)) {
+        echoHold = 4;
+        chase.phase = 'close';
+        chase.t = 0;
+        ctx.who = 'spot';
+        flash('Echo backs off — Spot has the field', 2);
         return true;
-      };
-    }
-    const prop = nearestProp(spotGait, step.to.kind);
-    spotGait.setTarget(prop ? propApproach(spotGait, prop) : null);
-    setStatus(prop ? `Spot ${going} to the ${prop.kind} \u00b7 ${echoSays()}` : `No ${Site.KINDS[step.to.kind].many} here.`);
-    return (t) => spotGait.arrived() || !spotGait.hasTarget() || t > 15;
-  }
-
-  let queue = [];
-  let current = null;
-
-  function tickQueue(dt) {
-    if (current && !current.finished) {
-      current.t += dt;
-      // The last step keeps running once done; only a step with more after it
-      // makes way.
-      if (current.done(current.t)) {
-        current.finished = true;
-        if (queue.length) current = null;
       }
+      if (ECHO_ON.test(text)) {
+        echoHold = 0;
+        chase.cool = 0;
+        ctx.who = 'spot';
+        flash('Echo is on him', 1.5);
+        return true;
+      }
+      // A bare name is an address: whatever follows the comma is for Echo.
+      if (named && !text.replace(ECHO_WHO, ' ').replace(/[^\p{L}\p{N}]/gu, '')) return true;
+      // Anything else said to Echo: it has one job and it is already doing it.
+      ctx.who = 'spot';
+      flash('Echo only chases — the moves are Spot’s', 2);
+      return true;
     }
-    while (!current && queue.length) {
-      const step = queue.shift();
-      current = { t: 0, done: runStep(step) };
-      if (queue.length && current.done(0)) current = null;
-    }
+
+    // A called move is acknowledged as it is queued, so the line under the box
+    // answers the visitor rather than whatever the chase was saying.
+    const call = (m) => {
+      queued.push(m);
+      flash(`Spot ${m.call}`, 1.2);
+      return true;
+    };
+    if (SPIN.test(text)) return call(spinMove(sideFrom(text)));
+    if (HURDLE.test(text)) return call(hurdleMove());
+    if (JUKE.test(text)) return call(jukeMove(sideFrom(text)));
+
+    // Anything else is a change to how Spot runs between cuts.
+    const cmd = spotGait.parse(clause);
+    if (!cmd) return false;
+    // The chase owns where Spot points; a phrase only says how it moves.
+    delete cmd.turn;
+    delete cmd.strafe;
+    Object.assign(cruise, cmd);
+    if (cmd.gait === 'stand') cruise.speed = 0;
+    flash(`Spot ${spotGait.describe(Object.assign({}, cruise))}`, 1.6);
+    return true;
   }
 
   function applyText(text) {
-    idle = null;
-    typedAt = clock;
-    touchedAt = clock;
+    let any = false;
     const ctx = { who: 'spot' };
-    const steps = [];
-    const unknown = [];
     text.split(SPLIT).map((c) => c.trim()).filter(Boolean).forEach((clause) => {
-      const got = readClause(clause, ctx);
-      if (got) steps.push(...got);
-      else unknown.push(clause);
+      if (readClause(clause, ctx)) any = true;
     });
-
-    // Only a phrase that names something no built-in place has goes out to
-    // the model, and never more than once every few seconds.
-    if (unknown.length && CLOUD_ENDPOINT && !steps.some((s) => s.site)) {
-      const ask = unknown.join(' ');
-      if (/[a-z]{3,}|[가-힣]{2,}/i.test(ask)) {
-        if (clock - lastAskAt < ASK_COOLDOWN) {
-          setStatus('One new place at a time \u2014 give the fog a few seconds.');
-          return;
-        }
-        steps.unshift({ site: askForPlace(ask) });
-        setStatus(`Looking for \u201c${ask}\u201d\u2026`);
-      }
+    if (!any) {
+      setStatus('Not sure what that means — try "juke left", "spin", "sprint", or "echo, back off".', true);
     }
-    if (!steps.length && !unknown.length) {
-      const name = ctx.who === 'echo' ? 'Echo' : ctx.who === 'both' ? 'Both' : 'Spot';
-      setStatus(`${name} listening \u2014 say what to do, like "${name.toLowerCase()}, trot forward".`);
-      return;
-    }
-    if (!steps.length) {
-      setStatus('Not sure what that means \u2014 try "trot forward", "follow", "go to the crates", or a place like "warehouse".', true);
-      return;
-    }
-    queue = steps;
-    current = null;
-    tickQueue(0);
   }
 
   function setupPrompt() {
@@ -1389,7 +1207,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!text) return;
       if (!spotGait) {
         pendingText = text;
-        setStatus('Waiting for the robots to load\u2026');
+        setStatus('Waiting for the robots to load…');
         return;
       }
       applyText(text);
@@ -1398,98 +1216,30 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // --- what the camera sees --------------------------------------------------
 
-  // Answered from where things are, not from pixels: every robot and prop is
-  // projected into the current camera and read off left to right.
+  // Answered from where things are, not from pixels: both robots are projected
+  // into the current camera and read off left to right.
   function describeView() {
-    if (curtain.veil > 0.5) return 'Nothing but fog right now.';
     const fwd = forwardVector();
     const right = [Math.cos(camera.yaw), 0, -Math.sin(camera.yaw)];
     const halfWidth = 0.5 * canvas.width / canvas.height;
     const seen = [];
-    const consider = (name, x, y, z, group) => {
+    const consider = (name, x, y, z) => {
       const v = [x - camera.pos[0], y - camera.pos[1], z - camera.pos[2]];
       const depth = v[0] * fwd[0] + v[1] * fwd[1] + v[2] * fwd[2];
       if (depth < 0.3) return;
       const across = (v[0] * right[0] + v[2] * right[2]) / depth;
       const dist = Math.hypot(v[0], v[2]);
-      if (Math.abs(across) > halfWidth * 1.05 || dist > 9.5) return;
+      if (Math.abs(across) > halfWidth * 1.05 || dist > 12) return;
       const side = across < -halfWidth / 3 ? 'on the left' : across > halfWidth / 3 ? 'on the right' : 'ahead';
-      seen.push({ name, dist, side, group });
+      seen.push(`${name} ${dist.toFixed(1)} m ${side}`);
     };
     consider('Spot', spotGait.pose.pos[0], 0.5, spotGait.pose.pos[2]);
     if (!pov) consider('Echo', echoGait.pose.pos[0], 0.5, echoGait.pose.pos[2]);
-    props.forEach((p) => consider(p.kind, p.x, p.h / 2, p.z, true));
-
-    const parts = [];
-    seen.filter((s) => !s.group).forEach((s) => parts.push(`${s.name} ${s.dist.toFixed(1)} m ${s.side}`));
-    const groups = {};
-    seen.filter((s) => s.group).forEach((s) => {
-      const key = `${s.name}|${s.side}`;
-      if (!groups[key] || groups[key].dist > s.dist) groups[key] = { ...s, n: (groups[key] ? groups[key].n : 0) + 1 };
-      else groups[key].n += 1;
-    });
-    Object.values(groups).sort((a, b) => a.dist - b.dist).forEach((g) => {
-      const kind = Site.KINDS[g.name];
-      parts.push(`${g.n > 1 ? `${g.n} ${kind.many}` : kind.one} ${g.side}, ${g.dist.toFixed(1)} m`);
-    });
+    const gap = Math.hypot(spotGait.state.pos[0] - echoGait.state.pos[0],
+      spotGait.state.pos[2] - echoGait.state.pos[2]);
+    seen.push(`${gap.toFixed(1)} m between them`);
     const from = pov ? 'Echo cam' : 'From here';
-    return parts.length ? `${from}: ${parts.join(' \u00b7 ')}` : `${from}: just fog and open ground.`;
-  }
-
-  // --- when nobody is typing -------------------------------------------------
-
-  // Most visitors never type, so the pair keeps itself busy: a slow stroll
-  // with Echo alongside, a stop while Echo scouts the nearest prop, a rest,
-  // and now and then a change of place, which only happens while nobody has
-  // touched the canvas for a while, so it never yanks the view from under a
-  // drag.
-  const IDLE_START = 8;
-  const IDLE_AFTER_TYPING = 40;
-  const PLACE_EVERY = 2;
-  let clock = 0;
-  let typedAt = -Infinity;
-  let touchedAt = -Infinity;
-  let idle = null;
-  let idleRounds = 0;
-
-  const IDLE_STAGES = [
-    { name: 'stroll', enter: () => {
-      setRelation(pairRelation);
-      spotGait.setTarget(null);
-      const cmd = { gait: 'walk', speed: 0.35, turn: 0.2, height: 0.5, stepHeight: 0.09, cadence: 1, lean: 0, arm: 'auto', label: 'strolling' };
-      spotGait.setCommand(cmd);
-      echoGait.setCommand(styleOf(cmd));
-    }, done: (t) => t > 12 },
-    { name: 'pause', enter: () => {
-      const cmd = { gait: 'stand', speed: 0, turn: 0, strafe: 0, label: 'standing' };
-      spotGait.setCommand(cmd);
-      echoGait.setCommand(styleOf(cmd));
-    }, done: (t) => t > 2.5 },
-    { name: 'scout', enter: () => startScout(nearestProp(echoGait, null, 1.2)), done: (t) => !scout || t > 20 },
-    { name: 'rest', enter: () => {}, done: (t) => t > 5 },
-    { name: 'place', enter: () => {
-      idleRounds += 1;
-      const quiet = clock - touchedAt > 20 && !pov && !reducedMotion;
-      if (quiet && idleRounds % PLACE_EVERY === 0) drawCurtain(Site.next(siteId));
-    }, done: () => curtain.phase === 'open' },
-  ];
-
-  function tickIdle(dt) {
-    clock += dt;
-    if (!idle) {
-      const wait = typedAt > -Infinity ? typedAt + IDLE_AFTER_TYPING : IDLE_START;
-      if (clock < wait || current && queue.length || curtainBusy()) return;
-      idle = { stage: -1, t: 0 };
-      queue = [];
-      current = null;
-    }
-    idle.t += dt;
-    const stage = IDLE_STAGES[idle.stage];
-    if (!stage || stage.done(idle.t)) {
-      idle.stage = (idle.stage + 1) % IDLE_STAGES.length;
-      idle.t = 0;
-      IDLE_STAGES[idle.stage].enter();
-    }
+    return `${from}: ${seen.join(' · ')}`;
   }
 
   let wired = false;
