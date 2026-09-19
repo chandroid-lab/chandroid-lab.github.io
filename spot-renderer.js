@@ -135,7 +135,11 @@ window.createSpotRenderer = function (gl, url) {
     uni[name] = gl.getUniformLocation(program, name);
   });
 
-  const hasUint32 = !!gl.getExtension('OES_element_index_uint');
+  // 32-bit indices are an extension in WebGL 1 and core in WebGL 2, where the
+  // extension is gone; without this check a WebGL 2 context would quietly drop
+  // every mesh part that needs them.
+  const isGL2 = typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext;
+  const hasUint32 = isGL2 || !!gl.getExtension('OES_element_index_uint');
 
   const texture = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, texture);

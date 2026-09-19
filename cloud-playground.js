@@ -396,7 +396,24 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   `;
 
-  const gl = canvas.getContext('webgl');
+  // 'webgl' is what this playground was written against; the other two are only
+  // for browsers that refuse it but hand out one of the aliases.
+  const CONTEXT_NAMES = ['webgl', 'experimental-webgl', 'webgl2'];
+
+  function createContext() {
+    for (const name of CONTEXT_NAMES) {
+      try {
+        const ctx = canvas.getContext(name);
+        if (ctx) return ctx;
+      } catch (e) {
+        // A few browsers throw here instead of returning null; try the next.
+      }
+    }
+    return null;
+  }
+
+  let gl = null;
+  let contextLost = false;
   let uResolution, uTime, uCloudColor, uDensity, uPuffiness, uTurbulence, uHeight;
   let uCamPos, uYaw, uPitch, uRoll;
   let uSpotTex, uSpotLoaded, uSpotA, uSpotB, uVeil, uProps, uPropCount;
@@ -485,10 +502,10 @@ document.addEventListener('DOMContentLoaded', () => {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, MAX_PROPS, 2, 0, gl.RGBA, gl.UNSIGNED_BYTE, propBytes);
     gl.activeTexture(gl.TEXTURE0);
-    if (Site) applySite(Site.find('yard'));
+    // On a restore this puts the place the visitor was in back, not the default.
+    if (Site) applySite(Site.find(siteId) || Site.find('yard'));
 
     resize();
-    window.addEventListener('resize', resize);
   }
 
   const MOVE_SPEED = 2.2;
@@ -670,7 +687,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function syncLoop() {
-    if (canvasIntersecting && document.visibilityState !== 'hidden') {
+    if (!contextLost && canvasIntersecting && document.visibilityState !== 'hidden') {
       startLoop();
     } else {
       stopLoop();
@@ -1475,22 +1492,76 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  if (!gl) {
-    setStatus('WebGL is not available in this browser.', true);
-  } else {
-    try {
-      initGL();
-      setupControls();
-      setupPrompt();
-      setupPov();
+  let wired = false;
 
-      new IntersectionObserver((entries) => {
-        canvasIntersecting = entries[0].isIntersecting;
-        syncLoop();
-      }, { threshold: 0.01 }).observe(canvas);
-      document.addEventListener('visibilitychange', syncLoop);
+  // Everything that survives a context loss is hooked up once; initGL() is the
+  // part that has to run again on every fresh context.
+  function startRenderer() {
+    initGL();
+    if (wired) return;
+    wired = true;
+    setupControls();
+    setupPrompt();
+    setupPov();
+    window.addEventListener('resize', resize);
+    new IntersectionObserver((entries) => {
+      canvasIntersecting = entries[0].isIntersecting;
+      syncLoop();
+    }, { threshold: 0.01 }).observe(canvas);
+    document.addEventListener('visibilitychange', syncLoop);
+  }
+
+  // Without preventDefault the browser never bothers to fire 'restored'.
+  canvas.addEventListener('webglcontextlost', (e) => {
+    e.preventDefault();
+    contextLost = true;
+    stopLoop();
+    spot = null;
+    setStatus('The browser dropped the 3D view — waiting for it to come back…', true);
+  });
+
+  canvas.addEventListener('webglcontextrestored', () => {
+    contextLost = false;
+    try {
+      startRenderer();
+      setStatus('');
+      syncLoop();
+    } catch (err) {
+      setStatus(err.message || 'Could not restart the WebGL renderer.', true);
+    }
+  });
+
+  // Hand the context back on the way out. Browsers cap how many can be alive at
+  // once, so a page that keeps its own on every visit is why the next one fails
+  // to get a context at all. A bfcache hide may come straight back, so leave it.
+  window.addEventListener('pagehide', (e) => {
+    stopLoop();
+    if (e.persisted || !gl) return;
+    const lose = gl.getExtension('WEBGL_lose_context');
+    if (lose) lose.loseContext();
+  });
+
+  // A browser at its context limit, or one whose GPU process is restarting,
+  // returns null for a moment and then recovers — so ask more than once.
+  let attempts = 0;
+
+  function tryStart() {
+    gl = createContext();
+    if (!gl) {
+      attempts += 1;
+      if (attempts < 3) {
+        setTimeout(tryStart, attempts * 400);
+        return;
+      }
+      setStatus('WebGL is not available in this browser.', true);
+      return;
+    }
+    try {
+      startRenderer();
     } catch (err) {
       setStatus(err.message || 'Could not start the WebGL renderer.', true);
     }
   }
+
+  tryStart();
 });
