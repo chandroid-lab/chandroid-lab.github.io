@@ -93,6 +93,9 @@ window.createSpotGait = function (model, start) {
   };
 
   const MAX_STRIDE = 0.42;
+  // Not 9.81: a slightly heavy world keeps a jump short enough to read as one
+  // beat of a run rather than a floaty hang.
+  const GRAVITY = 12;
   const HEIGHT_RANGE = [0.34, 0.58];
 
   function defaultCommand() {
@@ -113,10 +116,6 @@ window.createSpotGait = function (model, start) {
       // The legs hold their ground under it, so this is the robot dropping a
       // shoulder rather than the whole body tipping over.
       bank: 0,
-      // Height added to the whole robot, legs and all. Everything else here
-      // keeps the feet on the ground; this is the one thing that takes them
-      // off it, which is the only way a leap can actually leave the floor.
-      lift: 0,
       arm: 'auto',
       armAmp: 1,
       label: 'standing',
@@ -137,7 +136,11 @@ window.createSpotGait = function (model, start) {
     stepHeight: 0.09,
     lean: 0,
     bank: 0,
+    // How high off the ground the whole robot is, and how fast that is
+    // changing. Once the feet leave the floor these are the only two numbers
+    // that matter, and nothing eases them — they fall.
     lift: 0,
+    liftVel: 0,
     armAmp: 1,
     // Free-running so the arm keeps swinging while Spot stands still.
     armPhase: 0,
@@ -161,7 +164,7 @@ window.createSpotGait = function (model, start) {
   const NUMERIC = {
     speed: [-2.2, 2.2], strafe: [-1.5, 1.5], turn: [-3, 3], height: HEIGHT_RANGE,
     stepHeight: [0.03, 0.2], cadence: [0.5, 1.6], lean: [-0.2, 0.2], armAmp: [0.2, 2],
-    tau: [0.06, 1], bank: [-0.45, 0.45], lift: [0, 0.45],
+    tau: [0.06, 1], bank: [-0.45, 0.45],
   };
 
   function sanitize(next) {
@@ -323,9 +326,23 @@ window.createSpotGait = function (model, start) {
     state.stepHeight += (command.stepHeight - state.stepHeight) * ease;
     state.lean += (command.lean - state.lean) * ease;
     state.bank += (command.bank - state.bank) * ease;
-    state.lift += (command.lift - state.lift) * ease;
     state.armAmp += (command.armAmp - state.armAmp) * ease;
     state.turn += (command.turn - state.turn) * ease;
+
+    // A jump is the one part of this that isn't a steady command eased into
+    // place: the moment the feet are off the ground the body is on its own,
+    // so it gets integrated. An eased lift rises fast and then hangs, which
+    // is an elevator; this is a parabola, which is a jump.
+    if (state.lift > 0 || state.liftVel > 0) {
+      state.liftVel -= GRAVITY * step;
+      state.lift += state.liftVel * step;
+      if (state.lift <= 0) {
+        state.lift = 0;
+        state.liftVel = 0;
+      }
+    }
+    // How much of the robot's weight is off the ground, near enough.
+    const air = smoothstep(clamp(state.lift / 0.14, 0, 1));
 
     const gait = GAITS[command.gait] || GAITS.stand;
     const planar = Math.hypot(state.speed, state.strafe);
@@ -337,7 +354,9 @@ window.createSpotGait = function (model, start) {
     const moving = gait.freq > 0 && (planar > 0.02 || Math.abs(state.turn) > 0.05);
     // With nothing to walk to the phase holds, which leaves every foot planted
     // under its hip instead of marching in place.
-    if (moving) state.phase = frac(state.phase + freq * step);
+    // Running on in mid-air is the other half of what makes a jump look
+    // wrong, so the stride all but stops while the feet are off the ground.
+    if (moving) state.phase = frac(state.phase + freq * step * (1 - 0.92 * air));
 
     // Integrate the root. Body x is forward, body y is left; the render frame
     // maps them onto the ground plane with a mirror, so yaw turns clockwise.
@@ -352,6 +371,7 @@ window.createSpotGait = function (model, start) {
     // ground. What the legs get is that target rotated back into body axes.
     const bob = moving ? gait.bob * Math.sin(4 * Math.PI * state.phase) : 0;
     const pitch = state.lean + 0.06 * clamp(state.speed / 1.5, -1, 1)
+      + 0.09 * clamp(state.liftVel / 2.5, -1, 1)
       + (moving ? gait.bob * 0.6 * Math.sin(4 * Math.PI * state.phase + 1.2) : 0);
     // Roll into a turn the way a real dog leans into a corner, plus whatever
     // bank the command asked for on top.
@@ -369,7 +389,8 @@ window.createSpotGait = function (model, start) {
       const nomX = leg.hip[0];
       const nomY = leg.hip[1] + leg.plane;
       const th = frac(state.phase + gait.offsets[i]);
-      let fz = -(state.height + bob);
+      // Folded up under the body in flight, rather than dangling.
+      let fz = -(state.height * (1 - 0.3 * air) + bob);
       if (!moving) {
         foot[0] = nomX;
         foot[1] = nomY;
@@ -429,6 +450,15 @@ window.createSpotGait = function (model, start) {
     // and all — "stop" hands the steady pose back. `at`, if given, is asked
     // every frame for a point {x, z} to pan the camera toward.
     setLook: (on, at) => { looking = !!on; lookAt = at || null; },
+    // Throw the body upward at v m/s. Refused while already off the ground,
+    // so a held button can't stack jumps into a balloon.
+    launch: (v) => {
+      if (state.lift > 0.001 || state.liftVel > 0) return false;
+      state.liftVel = clamp(v, 0, 4);
+      return true;
+    },
+    airborne: () => state.lift > 0.001,
+    lift: () => state.lift,
     update,
     command,
     state,

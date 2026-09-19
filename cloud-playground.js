@@ -131,6 +131,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // Both robots on the ground: x, z, yaw.
     uniform vec3 uSpotA;
     uniform vec3 uSpotB;
+    // How far each one is off it. A shadow that doesn't let go is what makes
+    // a jump look pasted on.
+    uniform vec2 uLift;
     const float SPOT_MAX_DIST = ${SPOT_MAX_DIST.toFixed(1)};
 
     // The pair runs inside a pocket of thinner air, so the chase stays legible
@@ -203,18 +206,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Soft blob shadow under a robot, nudged away from the sun. The fog keeps
     // the light diffuse, so a blurry footprint reads better than a crisp one.
-    float spotGroundShade(vec3 gp, vec3 robot) {
+    float spotGroundShade(vec3 gp, vec3 robot, float lift) {
+      // Off the ground the blob spreads and thins, the way a real one does.
+      float spread = 1.0 + lift * 2.6;
+      float dim = 1.0 - clamp(lift * 1.9, 0.0, 0.75);
       vec2 d = gp.xz - robot.xy;
       float c = cos(robot.z);
       float s = sin(robot.z);
       vec2 local = vec2(c * d.x - s * d.y, s * d.x + c * d.y);
-      float contact = length(local / vec2(0.5, 0.26));
-      vec2 sunShift = -SUN_DIR.xz / SUN_DIR.y * 0.45;
+      float contact = length(local / (vec2(0.5, 0.26) * spread));
+      vec2 sunShift = -SUN_DIR.xz / SUN_DIR.y * (0.45 + lift);
       vec2 ds = d - sunShift;
       vec2 localSun = vec2(c * ds.x - s * ds.y, s * ds.x + c * ds.y);
-      float castDist = length(localSun / vec2(0.6, 0.3));
-      float shade = 1.0 - 0.45 * (1.0 - smoothstep(0.3, 1.2, contact));
-      shade *= 1.0 - 0.3 * (1.0 - smoothstep(0.4, 1.4, castDist));
+      float castDist = length(localSun / (vec2(0.6, 0.3) * spread));
+      float shade = 1.0 - 0.45 * dim * (1.0 - smoothstep(0.3, 1.2, contact));
+      shade *= 1.0 - 0.3 * dim * (1.0 - smoothstep(0.4, 1.4, castDist));
       return shade;
     }
 
@@ -250,7 +256,7 @@ document.addEventListener('DOMContentLoaded', () => {
         gp = ro + rd * tg;
         float grain = noise(gp * 2.5) * 0.6 + noise(gp * 11.0) * 0.4;
         vec3 ground = mix(vec3(0.24, 0.27, 0.25), vec3(0.34, 0.36, 0.33), grain);
-        robotShade = mix(1.0, spotGroundShade(gp, uSpotA) * spotGroundShade(gp, uSpotB), uSpotLoaded);
+        robotShade = mix(1.0, spotGroundShade(gp, uSpotA, uLift.x) * spotGroundShade(gp, uSpotB, uLift.y), uSpotLoaded);
         surf = ground * (0.5 + 0.5 * SUN_DIR.y) * robotShade;
         tHit = tg;
         onGround = true;
@@ -296,7 +302,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let contextLost = false;
   let uResolution, uTime, uCloudColor, uDensity, uPuffiness, uTurbulence, uHeight;
   let uCamPos, uYaw, uPitch, uRoll;
-  let uSpotTex, uSpotLoaded, uSpotA, uSpotB;
+  let uSpotTex, uSpotLoaded, uSpotA, uSpotB, uLift;
   let fogProgram, quadBuffer, quadPosLoc;
   let spot = null;
   // Spot carries the ball; Echo is the one chasing it.
@@ -348,6 +354,7 @@ document.addEventListener('DOMContentLoaded', () => {
     uSpotLoaded = gl.getUniformLocation(program, 'uSpotLoaded');
     uSpotA = gl.getUniformLocation(program, 'uSpotA');
     uSpotB = gl.getUniformLocation(program, 'uSpotB');
+    uLift = gl.getUniformLocation(program, 'uLift');
 
     // The fog scene still works if the robot can't be drawn for some reason.
     if (window.createSpotRenderer) {
@@ -567,6 +574,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const b = echoPose || { pos: ECHO_POS, yaw: SPOT_YAW };
     gl.uniform3f(uSpotA, a.pos[0], a.pos[2], a.yaw);
     gl.uniform3f(uSpotB, b.pos[0], b.pos[2], b.yaw);
+    gl.uniform2f(uLift, spotGait ? spotGait.lift() : 0, echoGait ? echoGait.lift() : 0);
     gl.uniform2f(uResolution, canvas.width, canvas.height);
     gl.uniform1f(uTime, clock);
     gl.uniform3f(uCloudColor, params.color[0], params.color[1], params.color[2]);
@@ -809,7 +817,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // the turn rate and the speed for itself; this is everything else.
   const CRUISE = {
     gait: 'trot', speed: 1.45, strafe: 0, turn: 0, height: 0.50, stepHeight: 0.12,
-    cadence: 1.05, lean: 0.03, bank: 0, lift: 0, tau: 0.3, arm: 'auto', armAmp: 1,
+    cadence: 1.05, lean: 0.03, bank: 0, tau: 0.3, arm: 'auto', armAmp: 1,
     label: 'running',
   };
   const cruise = CRUISE;
@@ -909,15 +917,19 @@ document.addEventListener('DOMContentLoaded', () => {
   // Straight over the top of the dive instead of around it: gather, leave the
   // ground, absorb the landing, run on.
   function hurdleMove() {
-    return { name: 'hurdling', call: 'goes over the top', cut: 1, steps: [
-      { t: 0.18, cmd: { gait: 'trot', speed: 0.95, height: 0.39, stepHeight: 0.06, cadence: 1.35,
-        lean: -0.06, lift: 0, tau: 0.08, arm: 'stow', label: 'gathering' } },
-      { t: 0.42, cmd: { gait: 'bound', speed: 1.85, height: 0.47, stepHeight: 0.18, cadence: 1,
-        lean: 0.13, lift: 0.3, tau: 0.07, arm: 'stow', label: 'in the air' } },
-      { t: 0.26, cmd: { gait: 'bound', speed: 1.6, height: 0.42, stepHeight: 0.1, cadence: 1.1,
-        lean: -0.04, lift: 0, tau: 0.08, label: 'landing' } },
+    // No slow motion on this one: a jump that hangs in the air is exactly the
+    // floaty look a real arc is there to avoid.
+    return { name: 'hurdling', call: 'goes over the top', steps: [
+      { t: 0.17, cmd: { gait: 'trot', speed: 0.95, height: 0.38, stepHeight: 0.06, cadence: 1.35,
+        lean: -0.07, tau: 0.07, arm: 'stow', label: 'gathering' } },
+      // The legs drive down as the body is thrown up, which is where the
+      // height going the other way comes from.
+      { t: 0.62, launch: 3, cmd: { gait: 'bound', speed: 1.8, height: 0.52, stepHeight: 0.14,
+        cadence: 1, lean: 0.05, tau: 0.07, arm: 'stow', label: 'in the air' } },
+      { t: 0.22, cmd: { gait: 'bound', speed: 1.55, height: 0.40, stepHeight: 0.09, cadence: 1.1,
+        lean: -0.05, tau: 0.06, label: 'landing' } },
       { t: 0.45, cmd: { gait: 'bound', speed: 1.95, height: 0.50, stepHeight: 0.15, cadence: 1.2,
-        lean: 0.05, lift: 0, tau: 0.2, arm: 'auto', label: 'breaking away' } },
+        lean: 0.05, tau: 0.2, arm: 'auto', label: 'breaking away' } },
     ] };
   }
 
@@ -944,6 +956,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     const beat = move.steps[move.i];
     spotGait.setCommand(Object.assign({}, cruise, beat.cmd));
+    if (beat.launch) spotGait.launch(beat.launch);
     // The cut itself is the moment worth slowing down for, and only when
     // Echo is close enough that it costs it something.
     if (move.cut && move.i === 1 && !reducedMotion && echoGait) {
@@ -1016,7 +1029,12 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
     move.t += dt;
-    if (move.t >= move.steps[move.i].t) nextBeat();
+    const beat = move.steps[move.i];
+    // A beat that threw the body in the air is over when the feet are back,
+    // not when a timer says so: a slow frame would otherwise have Spot still
+    // airborne while the landing plays, or land it and leave it hanging.
+    if (beat.launch && move.t > 0.12 && !spotGait.airborne()) nextBeat();
+    else if (move.t >= beat.t) nextBeat();
   }
 
   // --- what Echo does about it ----------------------------------------------
