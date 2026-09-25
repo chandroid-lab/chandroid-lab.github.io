@@ -430,3 +430,104 @@ html {
   height: 100%;
 }
 
+
+/* Phones. The layout is inline-styled tables sized for desktop, so on a
+   narrow screen the cells are unstacked into blocks here; !important is
+   what it takes to beat the inline widths and paddings. */
+@media (max-width: 600px) {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    margin: 0;
+  }
+
+  body,
+  td,
+  th,
+  tr,
+  p,
+  a,
+  strong,
+  .entrytitle {
+    font-size: 15px;
+    line-height: 1.55;
+  }
+
+  /* Header: photo, then name and badge, then the bio at full width. */
+  .hero,
+  .hero > tbody {
+    display: block;
+  }
+
+  .hero tr {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .hero-text,
+  .hero-photo {
+    display: block;
+    width: auto !important;
+    max-width: none !important;
+    padding: 0 20px !important;
+  }
+
+  .hero-photo {
+    order: -1;
+    padding-top: 32px !important;
+    text-align: center;
+  }
+
+  .hero-photo img {
+    width: 148px !important;
+  }
+
+  .name {
+    padding-top: 12px;
+  }
+
+  .section-head {
+    padding: 36px 20px 8px !important;
+  }
+
+  /* Entries: the logo sits small above its title instead of in a column. */
+  .entries,
+  .entries > tbody,
+  .entries tr {
+    display: block;
+  }
+
+  .entries tr {
+    margin-top: 28px;
+  }
+
+  .entry-logo-cell,
+  .entry-body {
+    display: block;
+    width: auto !important;
+    padding: 0 20px !important;
+  }
+
+  /* Capped both ways so a wide wordmark (KAIST) doesn't outweigh the rest. */
+  .entry-logo {
+    justify-content: flex-start;
+    width: 96px;
+    height: 36px;
+    margin-bottom: 8px;
+  }
+
+  .entry-list li {
+    margin-bottom: 6px;
+  }
+
+  .awards-grid {
+    padding: 20px 20px 32px;
+  }
+
+  .award-text,
+  .award-text a {
+    font-size: 14px;
+  }
+}
