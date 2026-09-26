@@ -71,10 +71,13 @@ document.addEventListener('DOMContentLoaded', () => {
         f.z);
     }
 
-    float fbm(vec3 p) {
+    // Octaves past the first few are finer than a pixel of this canvas, so
+    // each caller asks only for the detail it can actually show.
+    float fbm(vec3 p, int octaves) {
       float f = 0.0;
       float amp = 0.5;
       for (int i = 0; i < 6; i++) {
+        if (i >= octaves) break;
         f += amp * noise(p);
         p *= 2.03;
         amp *= 0.5;
@@ -87,19 +90,22 @@ document.addEventListener('DOMContentLoaded', () => {
     // little drift toward the camera.
     const vec3 WIND = vec3(0.34, 0.0, -0.1);
 
-    float fogDensity(vec3 p) {
+    // fine is false for the shadow probes, which only need a bank's broad
+    // shape, not its ragged edge.
+    float fogDensity(vec3 p, bool fine) {
       // Sampling upwind of p is what carries the whole field downwind.
       vec3 q = (p - WIND * uTime) * 0.92;
       // The warp churns the banks as they travel, so they change shape
       // instead of sliding past like a painted backdrop.
       q += 0.3 * vec3(
-        fbm(q * 0.7 + uTime * 0.12),
-        fbm(q * 0.7 - uTime * 0.08),
+        fbm(q * 0.7 + uTime * 0.12, 3),
+        fbm(q * 0.7 - uTime * 0.08, 3),
         0.0
       );
-      float base = fbm(q) - 0.35;
-      // Small bites out of the edges, so a bank has a ragged front.
-      base -= 0.15 * (1.0 - fbm(q * 4.0 + 7.3));
+      float base = fbm(q, fine ? 5 : 3) - 0.35;
+      // Small bites out of the edges, so a bank has a ragged front. The
+      // shadow probes take the bites' average instead.
+      base -= fine ? 0.15 * (1.0 - fbm(q * 4.0 + 7.3, 3)) : 0.08;
       // Lies on the ground: thickest below the shoulder, gone a couple of
       // meters up, so rising out of it shows the top of the bank.
       float layer = 1.0 - smoothstep(0.8, 1.8, abs(p.y - 0.96));
@@ -116,7 +122,7 @@ document.addEventListener('DOMContentLoaded', () => {
       vec3 pos = p;
       for (int i = 0; i < 3; i++) {
         pos += SUN_DIR * 0.22;
-        shadow += fogDensity(pos);
+        shadow += fogDensity(pos, false);
       }
       return clamp(1.0 - shadow * 0.85, 0.05, 1.0);
     }
@@ -130,7 +136,7 @@ document.addEventListener('DOMContentLoaded', () => {
       for (int i = 0; i < 80; i++) {
         if (acc.a > 0.99 || t > tEnd) break;
         vec3 p = ro + rd * t;
-        float d = fogDensity(p);
+        float d = fogDensity(p, true);
         if (d > 0.01) {
           float lit = sunLight(p);
           vec3 shadowColor = vec3(0.47, 0.52, 0.64);
@@ -214,10 +220,14 @@ document.addEventListener('DOMContentLoaded', () => {
     return sh;
   }
 
+  // Fog is soft to begin with, so it's drawn at half the canvas's CSS size and
+  // stretched to fit: a quarter of the pixels (a ninth on a retina screen) for
+  // a picture that looks the same.
+  const RENDER_SCALE = 0.5;
+
   function resize() {
-    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
-    const w = Math.max(1, Math.round(canvas.clientWidth * dpr));
-    const h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+    const w = Math.max(1, Math.round(canvas.clientWidth * RENDER_SCALE));
+    const h = Math.max(1, Math.round(canvas.clientHeight * RENDER_SCALE));
     if (canvas.width !== w || canvas.height !== h) {
       canvas.width = w;
       canvas.height = h;
@@ -283,9 +293,17 @@ document.addEventListener('DOMContentLoaded', () => {
   let looping = false;
   let canvasIntersecting = false;
   let lastFrameTime = 0;
+  // Wind this slow reads as smooth at 30 frames a second, and every frame
+  // skipped is a whole raymarch the GPU doesn't have to do. The 2 ms of slack
+  // keeps a 60 Hz screen on every other vsync instead of drifting off it.
+  const FRAME_INTERVAL = 1000 / 30 - 2;
 
   function frame(t) {
     if (!looping) return;
+    if (lastFrameTime && t - lastFrameTime < FRAME_INTERVAL) {
+      requestAnimationFrame(frame);
+      return;
+    }
     const dt = lastFrameTime ? Math.min((t - lastFrameTime) / 1000, 0.1) : 0;
     lastFrameTime = t;
     clock += dt * WIND_RATE;
