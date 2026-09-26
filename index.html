@@ -8,7 +8,7 @@
     <meta name="author" content="Chan Lee">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="shortcut icon" href="images/favicon/favicon.ico?v=3" type="image/x-icon">
-    <link rel="stylesheet" type="text/css" href="stylesheet.css?v=4">
+    <link rel="stylesheet" type="text/css" href="stylesheet.css?v=5">
   </head>
 
   <body>
@@ -48,6 +48,29 @@
               </td>
               <td class="hero-photo" style="padding:2.5%;width:37%;max-width:37%">
                 <a href="images/profile.jpeg"><img style="width:100%;max-width:100%;aspect-ratio:1/1;object-fit:cover;object-position:50% 40%;border-radius:50%;" alt="profile photo" src="images/profile.jpeg" class="hoverZoomLink"></a>
+              </td>
+            </tr>
+          </tbody></table>
+
+          <!-- Playground -->
+          <table style="width:100%;border:0px;border-spacing:0px;border-collapse:separate;margin-right:auto;margin-left:auto;"><tbody>
+            <tr>
+              <td class="section-head" style="padding:16px;width:100%;vertical-align:middle">
+                <h2 id="section-playground">Playground</h2>
+              </td>
+            </tr>
+          </tbody></table>
+          <table style="width:100%;border:0px;border-spacing:0px 10px;border-collapse:separate;margin-right:auto;margin-left:auto;"><tbody>
+            <tr>
+              <td class="playground-cell" style="padding:8px 16px;width:100%;vertical-align:middle">
+                <div class="cloud-panel">
+                  <div class="cloud-canvas-wrap">
+                    <canvas id="cloud-canvas" class="cloud-canvas" tabindex="0"
+                            aria-label="Fog drifting over open ground; drag to look around"></canvas>
+                  </div>
+                  <p class="cloud-hint">Drag to look around &middot; WASD or arrow keys to walk &middot; pinch to walk on a phone</p>
+                  <p id="cloud-status" class="cloud-status" hidden></p>
+                </div>
               </td>
             </tr>
           </tbody></table>
@@ -241,5 +264,7 @@
         </td>
       </tr>
     </table>
+
+    <script src="fog-playground.js?v=1" defer></script>
   </body>
 </html>
