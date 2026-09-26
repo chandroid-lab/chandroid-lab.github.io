@@ -211,6 +211,27 @@ span.highlight {
   }
 }
 
+/* Exhibitions: one line per show with the year to the side, kept lighter
+   than the entry cards so the art sits beside the robotics work. */
+.exhibit-list {
+  list-style: none;
+  margin: 0;
+  padding: 8px 16px 24px;
+}
+
+.exhibit-list li {
+  display: grid;
+  grid-template-columns: 44px 1fr;
+  gap: 12px;
+  margin-bottom: 10px;
+  line-height: 1.45;
+}
+
+.exhibit-year,
+.exhibit-meta {
+  color: #6b7684;
+}
+
 html {
   scroll-behavior: smooth;
 }
@@ -534,5 +555,9 @@ html {
   .award-text,
   .award-text a {
     font-size: 14px;
+  }
+
+  .exhibit-list {
+    padding: 20px 20px 40px;
   }
 }
