@@ -367,6 +367,20 @@ html {
   margin: 0;
 }
 
+/* The robot lineup under the bio: one wide studio shot on the page's white. */
+.lineup-img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.lineup-caption {
+  font-size: 12px;
+  color: #6b7684;
+  margin: 2px 0 0;
+  text-align: center;
+}
+
 .cloud-status.error {
   color: #c0392b;
 }
