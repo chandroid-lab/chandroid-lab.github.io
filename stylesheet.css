@@ -371,7 +371,9 @@ html {
 .lineup-img {
   display: block;
   width: 100%;
+  max-width: 600px;
   height: auto;
+  margin: 0 auto;
 }
 
 .lineup-caption {
