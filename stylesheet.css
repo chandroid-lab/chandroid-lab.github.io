@@ -367,20 +367,18 @@ html {
   margin: 0;
 }
 
-/* The robot lineup under the bio: one wide studio shot on the page's white. */
+/* The robot lineup under the bio: one long strip, the full width of the column,
+   on the page's white. */
 .lineup-img {
   display: block;
   width: 100%;
-  max-width: 570px;
   height: auto;
-  margin: 0 auto;
 }
 
 .lineup-caption {
   font-size: 12px;
   color: #6b7684;
-  max-width: 570px;
-  margin: 2px auto 0;
+  margin: 2px 0 0;
   text-align: center;
   text-wrap: balance;
 }
